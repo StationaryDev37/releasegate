@@ -1,10 +1,11 @@
 [package]
 name = "releasegate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
 [dependencies]
+attestation-verify = "0.1.0"
 anyhow = "1.0"
 axum = { version = "0.7", features = ["macros"] }
 hex = "0.4"
