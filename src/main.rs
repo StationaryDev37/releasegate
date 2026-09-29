@@ -127,7 +127,7 @@ async fn handle_github_webhook(
 
     match (source, event.as_str()) {
         ("github_app", "ping") | ("github_marketplace", "ping") => {}
-("github_app", "installation") => handle_installation(&state.db, &payload).await?,
+        ("github_app", "installation") => handle_installation(&state.db, &payload).await?,
         ("github_app", "push") => handle_push_source(&state.db, &payload, &delivery).await?,
         ("github_marketplace", "marketplace_purchase") => {
             billing::apply_marketplace_event(&state.db, &payload).await?;

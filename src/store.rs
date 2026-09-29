@@ -270,7 +270,7 @@ pub async fn record_trusted_source_event(
     let stored = trusted_source_by_delivery(pool, &source.delivery_id)
         .await?
         .ok_or_else(|| AppError::Conflict("trusted source event disappeared after insert".into()))?;
-    if stored != *source {
+    if &stored != source {
         return Err(AppError::Conflict(
             "delivery_id was already bound to different trusted source facts".into(),
         ));

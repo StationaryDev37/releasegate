@@ -297,6 +297,36 @@ mod tests {
     }
 
     #[test]
+    fn canonical_policy_hash_matches_independent_vector() {
+        assert_eq!(
+            policy().policy_sha256,
+            "6bc707d83af54b493743d2f7ba4eb287302d8ce5cdfab99550421fb0880cefc1"
+        );
+    }
+
+    #[test]
+    fn exact_ref_rule_does_not_accept_prefix_extensions() {
+        let exact = ReleasePolicy::new(ReleasePolicySpec {
+            installation_id: 42,
+            repository_id: 99,
+            repository: "acme/widget".into(),
+            ref_rule: RefRuleKind::Exact,
+            ref_value: "refs/tags/v1.2.3".into(),
+            signer_repository: "acme/release-workflows".into(),
+            signer_workflow_path: ".github/workflows/release.yml".into(),
+            signer_revision_sha: "a".repeat(40),
+        })
+        .expect("valid policy");
+        assert!(matches!(
+            exact.resolve(&source("refs/tags/v1.2.30")),
+            PolicyResolution::Rejected {
+                reason: "source_ref_not_allowed",
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn allowed_source_generates_exact_provenance_expectation() {
         let result = policy().resolve(&source("refs/tags/v1.2.3"));
         match result {
