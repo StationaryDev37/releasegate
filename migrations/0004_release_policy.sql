@@ -9,7 +9,8 @@ CREATE TABLE IF NOT EXISTS release_policy_versions (
     signer_workflow_path TEXT NOT NULL,
     signer_revision_sha TEXT NOT NULL,
     created_at TEXT NOT NULL,
-    UNIQUE(policy_sha256, installation_id, repository_id)
+    UNIQUE(policy_sha256, installation_id, repository_id),
+    FOREIGN KEY(installation_id) REFERENCES installations(installation_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_release_policy_repo
@@ -33,7 +34,8 @@ CREATE TABLE IF NOT EXISTS trusted_source_events (
     repository TEXT NOT NULL,
     source_ref TEXT NOT NULL,
     source_commit_sha TEXT NOT NULL,
-    observed_at TEXT NOT NULL
+    observed_at TEXT NOT NULL,
+    FOREIGN KEY(installation_id) REFERENCES installations(installation_id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_trusted_source_lookup

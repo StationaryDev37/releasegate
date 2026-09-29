@@ -169,7 +169,7 @@ impl GithubApi {
     pub fn new(signer: GithubAppJwtSigner) -> Result<Self, GithubApiError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
-        headers.insert(USER_AGENT, HeaderValue::from_static("releasegate/0.2"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("releasegate/0.3"));
         headers.insert(
             "x-github-api-version",
             HeaderValue::from_static(GITHUB_API_VERSION),

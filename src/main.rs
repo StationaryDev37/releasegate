@@ -239,6 +239,9 @@ async fn put_active_policy(
     authorize_ingest(&state.config.ingest_token, &headers)?;
     let policy = ReleasePolicy::new(spec)
         .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    if !store::installation_active(&state.db, policy.installation_id).await? {
+        return Err(AppError::Unauthorized);
+    }
     store::store_release_policy(&state.db, &policy).await?;
     store::activate_release_policy(&state.db, &policy).await?;
     Ok(Json(policy))

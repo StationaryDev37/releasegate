@@ -98,6 +98,10 @@ def main() -> None:
     p_hash = policy_hash(policy_fixture)
     assert p_hash == "6bc707d83af54b493743d2f7ba4eb287302d8ce5cdfab99550421fb0880cefc1"
     con.execute(
+        "INSERT INTO installations VALUES(?,?,?,?,?,?)",
+        (42, 7001, "acme", "Organization", 1, "2026-09-29T21:59:59Z"),
+    )
+    con.execute(
         """INSERT INTO release_policy_versions(
            policy_sha256,installation_id,repository_id,repository,ref_rule,ref_value,
            signer_repository,signer_workflow_path,signer_revision_sha,created_at
