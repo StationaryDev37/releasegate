@@ -2,7 +2,7 @@ use hmac::{Hmac, Mac};
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT};
 use tokio::sync::RwLock;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -101,6 +101,10 @@ pub enum GithubApiError {
     UnsafeBundleUrl,
     #[error("attestation bundle exceeds size limit")]
     BundleTooLarge,
+    #[error("attestation list is paginated beyond the bounded retrieval window")]
+    AttestationListIncomplete,
+    #[error("attestation bundle transport encoding is invalid")]
+    InvalidBundleEncoding,
     #[error("attestation bundle is not valid JSON")]
     InvalidBundleJson,
 }
@@ -137,13 +141,18 @@ struct AttestationListResponse {
 #[derive(Debug, Deserialize)]
 struct AttestationReference {
     repository_id: i64,
+    initiator: String,
     bundle_url: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct RawAttestationBundle {
     pub repository_id: i64,
+    pub initiator: String,
     pub source_url_sha256: String,
+    pub transport_encoding: String,
+    pub wire_sha256: String,
+    pub wire_bytes: Vec<u8>,
     pub bundle_sha256: String,
     pub raw_json: Vec<u8>,
 }
@@ -265,12 +274,21 @@ impl GithubApi {
             .client
             .get(url)
             .header(AUTHORIZATION, format!("Bearer {token}"))
+            .query(&[("predicate_type", "provenance"), ("per_page", "100")])
             .send()
             .await
             .map_err(|_| GithubApiError::Transport)?;
         let status = response.status();
         if !status.is_success() {
             return Err(GithubApiError::HttpStatus(status.as_u16()));
+        }
+        if response
+            .headers()
+            .get(LINK)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("rel=\"next\""))
+        {
+            return Err(GithubApiError::AttestationListIncomplete);
         }
         let listing: AttestationListResponse = response
             .json()
@@ -294,7 +312,8 @@ impl GithubApi {
         &self,
         item: &AttestationReference,
     ) -> Result<RawAttestationBundle, GithubApiError> {
-        const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
+        const MAX_WIRE_BYTES: u64 = 4 * 1024 * 1024;
+        const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
         let url = reqwest::Url::parse(&item.bundle_url)
             .map_err(|_| GithubApiError::UnsafeBundleUrl)?;
         validate_bundle_url(&url)?;
@@ -309,26 +328,57 @@ impl GithubApi {
         if !status.is_success() {
             return Err(GithubApiError::HttpStatus(status.as_u16()));
         }
-        if response.content_length().is_some_and(|n| n > MAX_BUNDLE_BYTES) {
+        if response.content_length().is_some_and(|n| n > MAX_WIRE_BYTES) {
             return Err(GithubApiError::BundleTooLarge);
         }
-        let bytes = response
+        let wire = response
             .bytes()
             .await
             .map_err(|_| GithubApiError::Transport)?;
-        if bytes.is_empty() || bytes.len() as u64 > MAX_BUNDLE_BYTES {
+        if wire.is_empty() || wire.len() as u64 > MAX_WIRE_BYTES {
             return Err(GithubApiError::BundleTooLarge);
         }
-        serde_json::from_slice::<serde_json::Value>(&bytes)
-            .map_err(|_| GithubApiError::InvalidBundleJson)?;
-        let bundle_sha256 = hex::encode(Sha256::digest(&bytes));
+        let wire_sha256 = hex::encode(Sha256::digest(&wire));
+        let (transport_encoding, raw_json) = decode_bundle_json(&wire, MAX_DECODED_BYTES)?;
+        let bundle_sha256 = hex::encode(Sha256::digest(&raw_json));
         Ok(RawAttestationBundle {
             repository_id: item.repository_id,
+            initiator: item.initiator.clone(),
             source_url_sha256,
+            transport_encoding: transport_encoding.to_owned(),
+            wire_sha256,
+            wire_bytes: wire.to_vec(),
             bundle_sha256,
-            raw_json: bytes.to_vec(),
+            raw_json,
         })
     }
+}
+
+fn decode_bundle_json(
+    wire: &[u8],
+    max_decoded_bytes: usize,
+) -> Result<(&'static str, Vec<u8>), GithubApiError> {
+    if serde_json::from_slice::<serde_json::Value>(wire).is_ok() {
+        if wire.len() > max_decoded_bytes {
+            return Err(GithubApiError::BundleTooLarge);
+        }
+        return Ok(("identity-json", wire.to_vec()));
+    }
+
+    let decoded_len = snap::raw::decompress_len(wire)
+        .map_err(|_| GithubApiError::InvalidBundleEncoding)?;
+    if decoded_len == 0 || decoded_len > max_decoded_bytes {
+        return Err(GithubApiError::BundleTooLarge);
+    }
+    let decoded = snap::raw::Decoder::new()
+        .decompress_vec(wire)
+        .map_err(|_| GithubApiError::InvalidBundleEncoding)?;
+    if decoded.len() != decoded_len || decoded.len() > max_decoded_bytes {
+        return Err(GithubApiError::InvalidBundleEncoding);
+    }
+    serde_json::from_slice::<serde_json::Value>(&decoded)
+        .map_err(|_| GithubApiError::InvalidBundleJson)?;
+    Ok(("snappy-raw", decoded))
 }
 
 fn split_repository(repository: &str) -> Result<(&str, &str), GithubApiError> {

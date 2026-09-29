@@ -93,15 +93,20 @@ pub async fn store_attestation_bundle(
     repository_id: i64,
     repository: &str,
     artifact_sha256: &str,
+    initiator: &str,
     source_url_sha256: &str,
+    transport_encoding: &str,
+    wire_sha256: &str,
+    wire_bytes: &[u8],
     bundle_sha256: &str,
     raw_json: &[u8],
 ) -> Result<(), AppError> {
     sqlx::query(
         r#"INSERT OR IGNORE INTO attestation_bundles(
             bundle_sha256,installation_id,repository_id,repository,artifact_sha256,
-            source_url_sha256,raw_json,fetched_at
-        ) VALUES(?,?,?,?,?,?,?,?)"#,
+            source_url_sha256,raw_json,fetched_at,initiator,transport_encoding,
+            wire_sha256,wire_bytes
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"#,
     )
     .bind(bundle_sha256)
     .bind(installation_id)
@@ -111,6 +116,10 @@ pub async fn store_attestation_bundle(
     .bind(source_url_sha256)
     .bind(raw_json)
     .bind(now_rfc3339())
+    .bind(initiator)
+    .bind(transport_encoding)
+    .bind(wire_sha256)
+    .bind(wire_bytes)
     .execute(pool)
     .await?;
     Ok(())

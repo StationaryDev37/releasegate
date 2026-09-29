@@ -37,7 +37,11 @@ pub async fn retrieve_and_store(
             repository_id,
             repository,
             artifact_sha256,
+            &bundle.initiator,
             &bundle.source_url_sha256,
+            &bundle.transport_encoding,
+            &bundle.wire_sha256,
+            &bundle.wire_bytes,
             &bundle.bundle_sha256,
             &bundle.raw_json,
         )
