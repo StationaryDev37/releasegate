@@ -96,7 +96,7 @@ def main() -> None:
 
     # Independent v0.3 policy commitment and persistence checks.
     p_hash = policy_hash(policy_fixture)
-    assert p_hash == "5962169627530d699a347e46b229c57988ed91ce778d1effaf6ffb189ff7e202"
+    assert p_hash == "6bc707d83af54b493743d2f7ba4eb287302d8ce5cdfab99550421fb0880cefc1"
     con.execute(
         """INSERT INTO release_policy_versions(
            policy_sha256,installation_id,repository_id,repository,ref_rule,ref_value,
