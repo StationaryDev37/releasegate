@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod github;
 mod model;
+mod provenance;
 mod receipt;
 mod store;
 mod verify;

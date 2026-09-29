@@ -7,7 +7,7 @@ use tokio::sync::RwLock;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use crate::error::AppError;
@@ -93,6 +93,16 @@ pub enum GithubApiError {
     HttpStatus(u16),
     #[error("GitHub API returned an invalid installation token response")]
     InvalidTokenResponse,
+    #[error("invalid GitHub repository or artifact digest")]
+    InvalidAttestationRequest,
+    #[error("GitHub attestation response is invalid")]
+    InvalidAttestationResponse,
+    #[error("attestation bundle URL is not allowed")]
+    UnsafeBundleUrl,
+    #[error("attestation bundle exceeds size limit")]
+    BundleTooLarge,
+    #[error("attestation bundle is not valid JSON")]
+    InvalidBundleJson,
 }
 
 #[derive(Clone)]
@@ -118,9 +128,30 @@ struct InstallationTokenResponse {
     expires_at: String,
 }
 
+
+#[derive(Debug, Deserialize)]
+struct AttestationListResponse {
+    attestations: Vec<AttestationReference>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttestationReference {
+    repository_id: i64,
+    bundle_url: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RawAttestationBundle {
+    pub repository_id: i64,
+    pub source_url_sha256: String,
+    pub bundle_sha256: String,
+    pub raw_json: Vec<u8>,
+}
+
 #[derive(Clone)]
 pub struct GithubApi {
     client: reqwest::Client,
+    bundle_client: reqwest::Client,
     signer: Arc<GithubAppJwtSigner>,
     token_cache: Arc<RwLock<HashMap<(i64, i64), CachedInstallationToken>>>,
 }
@@ -139,8 +170,14 @@ impl GithubApi {
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|_| GithubApiError::ClientBuild)?;
+        let bundle_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(20))
+            .build()
+            .map_err(|_| GithubApiError::ClientBuild)?;
         Ok(Self {
             client,
+            bundle_client,
             signer: Arc::new(signer),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
         })
@@ -203,6 +240,131 @@ impl GithubApi {
         );
         Ok(body.token)
     }
+
+    pub async fn fetch_attestation_bundles(
+        &self,
+        installation_id: i64,
+        repository_id: i64,
+        repository: &str,
+        artifact_sha256: &str,
+    ) -> Result<Vec<RawAttestationBundle>, GithubApiError> {
+        let (owner, repo) = split_repository(repository)?;
+        if artifact_sha256.len() != 64
+            || !artifact_sha256.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return Err(GithubApiError::InvalidAttestationRequest);
+        }
+        let token = self
+            .installation_token(installation_id, repository_id)
+            .await?;
+        let digest = format!("sha256:{}", artifact_sha256.to_ascii_lowercase());
+        let url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/attestations/{digest}"
+        );
+        let response = self
+            .client
+            .get(url)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|_| GithubApiError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubApiError::HttpStatus(status.as_u16()));
+        }
+        let listing: AttestationListResponse = response
+            .json()
+            .await
+            .map_err(|_| GithubApiError::InvalidAttestationResponse)?;
+        if listing.attestations.len() > 100 {
+            return Err(GithubApiError::InvalidAttestationResponse);
+        }
+
+        let mut bundles = Vec::with_capacity(listing.attestations.len());
+        for item in listing.attestations {
+            if item.repository_id != repository_id {
+                return Err(GithubApiError::InvalidAttestationResponse);
+            }
+            bundles.push(self.fetch_bundle(&item).await?);
+        }
+        Ok(bundles)
+    }
+
+    async fn fetch_bundle(
+        &self,
+        item: &AttestationReference,
+    ) -> Result<RawAttestationBundle, GithubApiError> {
+        const MAX_BUNDLE_BYTES: u64 = 4 * 1024 * 1024;
+        let url = reqwest::Url::parse(&item.bundle_url)
+            .map_err(|_| GithubApiError::UnsafeBundleUrl)?;
+        validate_bundle_url(&url)?;
+        let source_url_sha256 = hex::encode(Sha256::digest(item.bundle_url.as_bytes()));
+        let response = self
+            .bundle_client
+            .get(url)
+            .send()
+            .await
+            .map_err(|_| GithubApiError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubApiError::HttpStatus(status.as_u16()));
+        }
+        if response.content_length().is_some_and(|n| n > MAX_BUNDLE_BYTES) {
+            return Err(GithubApiError::BundleTooLarge);
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|_| GithubApiError::Transport)?;
+        if bytes.is_empty() || bytes.len() as u64 > MAX_BUNDLE_BYTES {
+            return Err(GithubApiError::BundleTooLarge);
+        }
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| GithubApiError::InvalidBundleJson)?;
+        let bundle_sha256 = hex::encode(Sha256::digest(&bytes));
+        Ok(RawAttestationBundle {
+            repository_id: item.repository_id,
+            source_url_sha256,
+            bundle_sha256,
+            raw_json: bytes.to_vec(),
+        })
+    }
+}
+
+fn split_repository(repository: &str) -> Result<(&str, &str), GithubApiError> {
+    let Some((owner, repo)) = repository.split_once('/') else {
+        return Err(GithubApiError::InvalidAttestationRequest);
+    };
+    if owner.is_empty()
+        || repo.is_empty()
+        || repo.contains('/')
+        || !owner.bytes().all(valid_repo_byte)
+        || !repo.bytes().all(valid_repo_byte)
+    {
+        return Err(GithubApiError::InvalidAttestationRequest);
+    }
+    Ok((owner, repo))
+}
+
+fn valid_repo_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
+}
+
+fn validate_bundle_url(url: &reqwest::Url) -> Result<(), GithubApiError> {
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.host_str().is_none()
+    {
+        return Err(GithubApiError::UnsafeBundleUrl);
+    }
+    let host = url.host_str().expect("checked above");
+    if host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok()
+    {
+        return Err(GithubApiError::UnsafeBundleUrl);
+    }
+    Ok(())
 }
 
 #[cfg(test)]

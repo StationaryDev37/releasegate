@@ -85,3 +85,33 @@ pub async fn record_usage(pool: &SqlitePool, installation_id: i64, metric: &str,
         .execute(pool).await?;
     Ok(())
 }
+
+#[allow(clippy::too_many_arguments)]
+pub async fn store_attestation_bundle(
+    pool: &SqlitePool,
+    installation_id: i64,
+    repository_id: i64,
+    repository: &str,
+    artifact_sha256: &str,
+    source_url_sha256: &str,
+    bundle_sha256: &str,
+    raw_json: &[u8],
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO attestation_bundles(
+            bundle_sha256,installation_id,repository_id,repository,artifact_sha256,
+            source_url_sha256,raw_json,fetched_at
+        ) VALUES(?,?,?,?,?,?,?,?)"#,
+    )
+    .bind(bundle_sha256)
+    .bind(installation_id)
+    .bind(repository_id)
+    .bind(repository)
+    .bind(artifact_sha256.to_ascii_lowercase())
+    .bind(source_url_sha256)
+    .bind(raw_json)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
