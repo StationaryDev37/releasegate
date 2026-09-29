@@ -5,7 +5,7 @@ use crate::provenance::ProvenanceExpectation;
 
 const POLICY_VERSION: u8 = 1;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RefRuleKind {
     Exact,
@@ -220,7 +220,7 @@ fn validate_repository(value: &str) -> Result<(), PolicyError> {
 
 fn validate_ref(value: &str) -> Result<(), PolicyError> {
     let valid = value.starts_with("refs/heads/") || value.starts_with("refs/tags/");
-    if !valid || value.len() <= "refs/tags/".len() || value.contains(['\r', '\n', '*']) {
+    if !valid || value.len() <= "refs/tags/".len() || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*')) {
         return Err(PolicyError::InvalidRefRule);
     }
     Ok(())
@@ -228,7 +228,7 @@ fn validate_ref(value: &str) -> Result<(), PolicyError> {
 
 fn validate_ref_prefix(value: &str) -> Result<(), PolicyError> {
     let valid = value.starts_with("refs/heads/") || value.starts_with("refs/tags/");
-    if !valid || value.len() <= "refs/tags/".len() || value.contains(['\r', '\n', '*']) {
+    if !valid || value.len() <= "refs/tags/".len() || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*')) {
         return Err(PolicyError::InvalidRefRule);
     }
     Ok(())
@@ -238,7 +238,7 @@ fn valid_workflow_path(path: &str) -> bool {
     path.starts_with(".github/workflows/")
         && (path.ends_with(".yml") || path.ends_with(".yaml"))
         && !path.contains("..")
-        && !path.contains(['\r', '\n'])
+        && !path.chars().any(|ch| matches!(ch, '\r' | '\n'))
 }
 
 fn is_sha1_hex(value: &str) -> bool {

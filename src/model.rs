@@ -33,3 +33,11 @@ pub struct WebhookAck {
     pub status: &'static str,
     pub delivery_id: String,
 }
+
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PolicyResolveRequest {
+    pub installation_id: i64,
+    pub repository_id: i64,
+    pub source_commit_sha: String,
+}

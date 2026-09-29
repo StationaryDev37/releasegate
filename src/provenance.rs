@@ -33,7 +33,7 @@ pub enum ProvenanceGateError {
 /// All fields are caller-supplied expectations, never copied from the untrusted
 /// bundle and then accepted as policy. The repository id is pinned because the
 /// Fulcio certificate authenticates the source repository numeric id.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProvenanceExpectation {
     pub source_repository: String,
     pub source_repository_id: u64,

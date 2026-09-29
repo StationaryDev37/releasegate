@@ -49,6 +49,18 @@ pub async fn entitlement_active(pool: &SqlitePool, installation_id: i64) -> Resu
     Ok(active.is_some())
 }
 
+
+
+pub async fn installation_active(pool: &SqlitePool, installation_id: i64) -> Result<bool, AppError> {
+    let active: Option<i64> = sqlx::query_scalar(
+        "SELECT 1 FROM installations WHERE installation_id=? AND active=1 LIMIT 1",
+    )
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(active.is_some())
+}
+
 pub async fn store_receipt(pool: &SqlitePool, r: &Receipt) -> Result<Receipt, AppError> {
     sqlx::query(r#"INSERT OR IGNORE INTO verification_receipts(receipt_id,installation_id,request_id,repository,source_commit,
         artifact_sha256,manifest_sha256,policy_sha256,evidence_commitment,outcome,reason_code,receipt_sha256,created_at)
@@ -170,7 +182,7 @@ pub async fn store_release_policy(
     .fetch_one(pool)
     .await?;
     let reconstructed = policy_from_row(stored)?;
-    if reconstructed != *policy {
+    if &reconstructed != policy {
         return Err(AppError::Conflict(
             "policy hash already exists with different canonical content".into(),
         ));

@@ -21,8 +21,9 @@ use axum::{
 };
 use config::Config;
 use error::AppError;
-use model::{Receipt, VerificationRequest, WebhookAck};
+use model::{PolicyResolveRequest, Receipt, VerificationRequest, WebhookAck};
 use serde_json::Value;
+use policy::{PolicyResolution, ReleasePolicy, ReleasePolicySpec, TrustedSourceContext};
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use subtle::ConstantTimeEq;
@@ -63,6 +64,8 @@ fn router(state: AppState) -> Router {
             post(github_marketplace_webhook),
         )
         .route("/v1/verify", post(verify_evidence))
+        .route("/v1/policies/active", post(put_active_policy))
+        .route("/v1/policies/resolve", post(resolve_policy))
         .route("/v1/receipts/:id", get(get_receipt))
         .layer(RequestBodyLimitLayer::new(1_048_576))
         .layer(TraceLayer::new_for_http())
@@ -124,7 +127,8 @@ async fn handle_github_webhook(
 
     match (source, event.as_str()) {
         ("github_app", "ping") | ("github_marketplace", "ping") => {}
-        ("github_app", "installation") => handle_installation(&state.db, &payload).await?,
+("github_app", "installation") => handle_installation(&state.db, &payload).await?,
+        ("github_app", "push") => handle_push_source(&state.db, &payload, &delivery).await?,
         ("github_marketplace", "marketplace_purchase") => {
             billing::apply_marketplace_event(&state.db, &payload).await?;
         }
@@ -181,6 +185,83 @@ async fn handle_installation(db: &SqlitePool, payload: &Value) -> Result<(), App
         active,
     )
     .await
+}
+
+
+async fn handle_push_source(
+    db: &SqlitePool,
+    payload: &Value,
+    delivery_id: &str,
+) -> Result<(), AppError> {
+    if payload.get("deleted").and_then(Value::as_bool) == Some(true) {
+        return Ok(());
+    }
+    let installation_id = payload
+        .pointer("/installation/id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| AppError::BadRequest("installation.id missing".into()))?;
+    if !store::installation_active(db, installation_id).await? {
+        return Err(AppError::Unauthorized);
+    }
+    let repository_id = payload
+        .pointer("/repository/id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| AppError::BadRequest("repository.id missing".into()))?;
+    let repository = payload
+        .pointer("/repository/full_name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("repository.full_name missing".into()))?;
+    let source_ref = payload
+        .get("ref")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("ref missing".into()))?;
+    let source_commit_sha = payload
+        .get("after")
+        .and_then(Value::as_str)
+        .ok_or_else(|| AppError::BadRequest("after missing".into()))?;
+
+    let source = TrustedSourceContext {
+        installation_id,
+        repository_id,
+        repository: repository.to_owned(),
+        source_ref: source_ref.to_owned(),
+        source_commit_sha: source_commit_sha.to_owned(),
+        delivery_id: delivery_id.to_owned(),
+    };
+    store::record_trusted_source_event(db, &source).await
+}
+
+async fn put_active_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(spec): Json<ReleasePolicySpec>,
+) -> Result<Json<ReleasePolicy>, AppError> {
+    authorize_ingest(&state.config.ingest_token, &headers)?;
+    let policy = ReleasePolicy::new(spec)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    store::store_release_policy(&state.db, &policy).await?;
+    store::activate_release_policy(&state.db, &policy).await?;
+    Ok(Json(policy))
+}
+
+async fn resolve_policy(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(req): Json<PolicyResolveRequest>,
+) -> Result<Json<PolicyResolution>, AppError> {
+    authorize_ingest(&state.config.ingest_token, &headers)?;
+    let policy = store::active_release_policy(&state.db, req.installation_id, req.repository_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let source = store::trusted_source_for_commit(
+        &state.db,
+        req.installation_id,
+        req.repository_id,
+        &req.source_commit_sha,
+    )
+    .await?
+    .ok_or(AppError::NotFound)?;
+    Ok(Json(policy.resolve(&source)))
 }
 
 async fn verify_evidence(
