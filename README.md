@@ -4,23 +4,34 @@ ReleaseGate is a fail-closed verification and entitlement service designed to si
 
 **Commercial loop:** INSTALL → ENTITLE → VERIFY → RECEIPT → METER → REPEAT.
 
-## v0.1 implemented slice
+## Implemented slices
 
-- GitHub webhook endpoint with raw-body HMAC-SHA256 verification.
-- Delivery-id idempotency ledger.
-- GitHub App installation lifecycle persistence.
-- GitHub Marketplace `marketplace_purchase` entitlement state.
-- Authenticated evidence verification API.
-- Deterministic evidence commitment and receipt digest.
-- Idempotent usage meter.
-- SQLite WAL persistence and migrations.
-- Health/readiness endpoints.
-- Strict 1 MiB request-body limit.
-- JSON structured logs.
+### v0.1 — ingress / entitlement / receipt / meter
 
-## Security boundary
+- GitHub App and Marketplace webhook HMAC verification.
+- installation + subscription persistence.
+- deterministic evidence/receipt commitments.
+- idempotent usage ledger.
+- SQLite WAL persistence.
 
-v0.1 returns **`INDETERMINATE`** after structurally validating and deterministically committing the submitted evidence tuple. It deliberately does **not** return `VERIFIED` until ReleaseGate independently retrieves and verifies build evidence. The next gate is GitHub App installation-token authentication + artifact retrieval + provenance/SBOM verification. This distinction is intentional; status is not inflated.
+### v0.2 — provenance gate
+
+- GitHub App RS256 JWT minting.
+- repository-scoped installation-token exchange/cache.
+- bounded artifact-attestation retrieval with raw transport evidence.
+- fail-closed supported GitHub/Sigstore provenance verification.
+
+### v0.3 — policy gate
+
+- immutable, content-addressed release-policy versions.
+- active policy pointer per installation/repository.
+- authenticated GitHub push source ledger.
+- exact `(installation, repo, commit, ref)` source resolution.
+- deterministic policy -> `ProvenanceExpectation` generation.
+
+## Current security boundary
+
+`VERIFIED` is reserved for evidence that completes the supported cryptographic provenance chain under an exact trusted identity expectation. v0.3 does not let a verification request invent repository/ref/commit or signer policy: source facts come from HMAC-authenticated GitHub push deliveries and signer requirements come from immutable organization policy. Unsupported or incomplete trust remains fail-closed.
 
 ## Build
 
@@ -39,7 +50,7 @@ Point the GitHub App webhook URL at:
 
 `https://YOUR_HOST/webhooks/github/app`
 
-Use `application/json`, configure a high-entropy App webhook secret, and subscribe to `installation`. Configure the Marketplace listing webhook separately at `https://YOUR_HOST/webhooks/github/marketplace` with its own high-entropy secret for `marketplace_purchase` events.
+Use `application/json`, configure a high-entropy App webhook secret, and subscribe to `installation` and `push`. Configure the Marketplace listing webhook separately at `https://YOUR_HOST/webhooks/github/marketplace` with its own high-entropy secret for `marketplace_purchase` events.
 
 GitHub sends webhook signatures in `X-Hub-Signature-256`; ReleaseGate rejects deliveries that do not authenticate.
 
@@ -68,16 +79,6 @@ GitHub Marketplace can supply free, flat-rate, and per-unit plans. ReleaseGate s
 
 ## Current closure status
 
-| Gate | Status |
-|---|---|
-| Source implementation | IMPLEMENTED |
-| Static fixture validation | IMPLEMENTED |
-| Rust format | UNEXECUTED in authoring runtime |
-| Compile | UNEXECUTED in authoring runtime |
-| Clippy | UNEXECUTED in authoring runtime |
-| Rust tests | UNEXECUTED in authoring runtime |
-| GitHub App live delivery | BLOCKED on external App registration/secret |
-| GitHub Marketplace paid billing | BLOCKED on publisher/listing approval |
-| Release | BLOCKED until compile/test gates pass |
+See `STATUS.md` for the evidence table. Rust format/compile/Clippy/tests remain **UNEXECUTED** in the authoring runtime because no Rust toolchain is installed. Live GitHub integration remains blocked on real App credentials, installation, deployed HTTPS ingress, and a real attested artifact.
 
-See `docs/ARCHITECTURE.md`, `docs/PRODUCT.md`, and `docs/NEXT_GATE.md`.
+See `docs/ARCHITECTURE.md`, `docs/V0_3_POLICY_GATE.md`, `docs/PRODUCT.md`, and `docs/NEXT_GATE.md`.

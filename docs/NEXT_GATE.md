@@ -1,16 +1,26 @@
-# Next Gate: cryptographically strong automated release verification
+# Next Gate: v0.4 verification orchestration + SBOM commitment
 
-The next release must close these items in this order:
+v0.1 is immutable. v0.2 verifies GitHub provenance. v0.3 generates the verifier expectation from trusted source context and immutable organization policy.
 
-1. GitHub App JWT using the App private key.
-2. Exchange JWT for installation access token.
-3. Resolve commit SHA and fetch the selected workflow artifact from GitHub API.
-4. Stream artifact hashing with bounded decompression / archive traversal protections.
-5. Ingest SLSA provenance / GitHub artifact attestation when present.
-6. Parse SBOM (CycloneDX/SPDX) and compute canonical dependency commitment.
-7. Policy engine producing VERIFIED / REJECTED / INDETERMINATE.
-8. Post a GitHub Check result and immutable receipt URL.
-9. Replace global ingest token with GitHub OIDC or per-installation scoped credentials.
-10. Quota enforcement derived from Marketplace plan state.
+The next gate closes the live decision path without adding UI or billing scope:
 
-Release predicate: format + compile + clippy + unit/integration tests + live signed webhook fixture + live GitHub installation roundtrip.
+1. Wire GitHub App credentials/API client into application state.
+2. Resolve exact trusted source `(installation, repo, commit, ref)` and active policy.
+3. Generate `ProvenanceExpectation` from v0.3 policy resolution.
+4. Retrieve/store attestation bundles using the v0.2 bounded GitHub path.
+5. Run v0.2 provenance verification with the v0.3 expectation.
+6. Parse supported SBOM evidence (CycloneDX/SPDX) with strict size/resource limits.
+7. Produce a deterministic canonical SBOM/dependency commitment.
+8. Compose provenance + SBOM + policy into the release decision input.
+
+Stop there.
+
+Still out of scope for this gate:
+
+- GitHub Check Runs
+- receipt signing/integration changes
+- Marketplace/AWS billing changes
+- dashboard/UI
+- generalized multi-provider provenance
+
+Release predicate remains: `cargo fmt --check` + compile + Clippy `-D warnings` + Rust tests + static gate + live signed webhook roundtrip + live installation-token/attestation roundtrip.

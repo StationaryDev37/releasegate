@@ -1,0 +1,19 @@
+STATIC_GATE_PASS
+
+Scope executed in the authoring runtime:
+- Cargo.toml parsed with Python tomllib
+- all JSON fixtures parsed
+- migrations 0001..0004 executed in order against SQLite with foreign keys enabled
+- GitHub HMAC known vector verified
+- v0.1 receipt deterministic vector verified
+- v0.3 canonical policy hash independently reproduced
+- exact trusted source commit+ref selection exercised
+- cross-repository active-policy foreign key rejection exercised
+- git diff --check passed
+
+Not executed here:
+- rustfmt
+- rustc/cargo build
+- clippy
+- Rust unit/integration tests
+- live GitHub webhook/token/attestation roundtrip
