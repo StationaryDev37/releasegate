@@ -278,21 +278,23 @@ pub async fn record_trusted_source_event(
     Ok(())
 }
 
-pub async fn trusted_source_for_commit(
+pub async fn trusted_source_for_commit_ref(
     pool: &SqlitePool,
     installation_id: i64,
     repository_id: i64,
     source_commit_sha: &str,
+    source_ref: &str,
 ) -> Result<Option<crate::policy::TrustedSourceContext>, AppError> {
     let row: Option<(String, i64, i64, String, String, String)> = sqlx::query_as(
         r#"SELECT delivery_id,installation_id,repository_id,repository,source_ref,source_commit_sha
            FROM trusted_source_events
-           WHERE installation_id=? AND repository_id=? AND source_commit_sha=?
+           WHERE installation_id=? AND repository_id=? AND source_commit_sha=? AND source_ref=?
            ORDER BY observed_at DESC LIMIT 1"#,
     )
     .bind(installation_id)
     .bind(repository_id)
     .bind(source_commit_sha.to_ascii_lowercase())
+    .bind(source_ref)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(|(delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)| {

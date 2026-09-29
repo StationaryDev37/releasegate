@@ -225,7 +225,7 @@ async fn handle_push_source(
         repository_id,
         repository: repository.to_owned(),
         source_ref: source_ref.to_owned(),
-        source_commit_sha: source_commit_sha.to_owned(),
+        source_commit_sha: source_commit_sha.to_ascii_lowercase(),
         delivery_id: delivery_id.to_owned(),
     };
     store::record_trusted_source_event(db, &source).await
@@ -253,11 +253,12 @@ async fn resolve_policy(
     let policy = store::active_release_policy(&state.db, req.installation_id, req.repository_id)
         .await?
         .ok_or(AppError::NotFound)?;
-    let source = store::trusted_source_for_commit(
+    let source = store::trusted_source_for_commit_ref(
         &state.db,
         req.installation_id,
         req.repository_id,
         &req.source_commit_sha,
+        &req.source_ref,
     )
     .await?
     .ok_or(AppError::NotFound)?;

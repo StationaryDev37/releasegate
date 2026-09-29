@@ -1,0 +1,13 @@
+{
+  "ref": "refs/tags/v1.2.3",
+  "after": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "created": true,
+  "deleted": false,
+  "repository": {
+    "id": 99,
+    "full_name": "acme/widget"
+  },
+  "installation": {
+    "id": 42
+  }
+}

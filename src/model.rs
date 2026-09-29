@@ -40,4 +40,5 @@ pub struct PolicyResolveRequest {
     pub installation_id: i64,
     pub repository_id: i64,
     pub source_commit_sha: String,
+    pub source_ref: String,
 }

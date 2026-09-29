@@ -1,0 +1,10 @@
+{
+  "installation_id": 42,
+  "repository_id": 99,
+  "repository": "acme/widget",
+  "ref_rule": "prefix",
+  "ref_value": "refs/tags/v",
+  "signer_repository": "acme/release-workflows",
+  "signer_workflow_path": ".github/workflows/release.yml",
+  "signer_revision_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}
