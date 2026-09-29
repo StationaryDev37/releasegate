@@ -1,0 +1,1 @@
+{"action":"purchased","effective_date":"2026-09-29T20:00:00Z","marketplace_purchase":{"account":{"id":9001,"login":"acme","type":"Organization"},"billing_cycle":"monthly","unit_count":1,"plan":{"id":777,"name":"team"}}}
