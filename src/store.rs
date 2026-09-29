@@ -124,3 +124,225 @@ pub async fn store_attestation_bundle(
     .await?;
     Ok(())
 }
+
+#[derive(Debug, sqlx::FromRow)]
+struct ReleasePolicyRow {
+    policy_sha256: String,
+    installation_id: i64,
+    repository_id: i64,
+    repository: String,
+    ref_rule: String,
+    ref_value: String,
+    signer_repository: String,
+    signer_workflow_path: String,
+    signer_revision_sha: String,
+}
+
+pub async fn store_release_policy(
+    pool: &SqlitePool,
+    policy: &crate::policy::ReleasePolicy,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO release_policy_versions(
+            policy_sha256,installation_id,repository_id,repository,ref_rule,ref_value,
+            signer_repository,signer_workflow_path,signer_revision_sha,created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?)"#,
+    )
+    .bind(&policy.policy_sha256)
+    .bind(policy.installation_id)
+    .bind(policy.repository_id)
+    .bind(&policy.repository)
+    .bind(policy.ref_rule.as_str())
+    .bind(&policy.ref_value)
+    .bind(&policy.signer_repository)
+    .bind(&policy.signer_workflow_path)
+    .bind(&policy.signer_revision_sha)
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+
+    let stored = sqlx::query_as::<_, ReleasePolicyRow>(
+        r#"SELECT policy_sha256,installation_id,repository_id,repository,ref_rule,ref_value,
+           signer_repository,signer_workflow_path,signer_revision_sha
+           FROM release_policy_versions WHERE policy_sha256=?"#,
+    )
+    .bind(&policy.policy_sha256)
+    .fetch_one(pool)
+    .await?;
+    let reconstructed = policy_from_row(stored)?;
+    if reconstructed != *policy {
+        return Err(AppError::Conflict(
+            "policy hash already exists with different canonical content".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn activate_release_policy(
+    pool: &SqlitePool,
+    policy: &crate::policy::ReleasePolicy,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    let exists: Option<i64> = sqlx::query_scalar(
+        r#"SELECT 1 FROM release_policy_versions
+           WHERE policy_sha256=? AND installation_id=? AND repository_id=? LIMIT 1"#,
+    )
+    .bind(&policy.policy_sha256)
+    .bind(policy.installation_id)
+    .bind(policy.repository_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if exists.is_none() {
+        return Err(AppError::Conflict(
+            "cannot activate a policy version that is not stored".into(),
+        ));
+    }
+
+    sqlx::query(
+        r#"INSERT INTO active_release_policies(installation_id,repository_id,policy_sha256,activated_at)
+           VALUES(?,?,?,?)
+           ON CONFLICT(installation_id,repository_id) DO UPDATE SET
+             policy_sha256=excluded.policy_sha256,
+             activated_at=excluded.activated_at"#,
+    )
+    .bind(policy.installation_id)
+    .bind(policy.repository_id)
+    .bind(&policy.policy_sha256)
+    .bind(now_rfc3339())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn active_release_policy(
+    pool: &SqlitePool,
+    installation_id: i64,
+    repository_id: i64,
+) -> Result<Option<crate::policy::ReleasePolicy>, AppError> {
+    let row = sqlx::query_as::<_, ReleasePolicyRow>(
+        r#"SELECT p.policy_sha256,p.installation_id,p.repository_id,p.repository,p.ref_rule,p.ref_value,
+           p.signer_repository,p.signer_workflow_path,p.signer_revision_sha
+           FROM active_release_policies a
+           JOIN release_policy_versions p ON p.policy_sha256=a.policy_sha256
+           WHERE a.installation_id=? AND a.repository_id=? LIMIT 1"#,
+    )
+    .bind(installation_id)
+    .bind(repository_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(policy_from_row).transpose()
+}
+
+pub async fn record_trusted_source_event(
+    pool: &SqlitePool,
+    source: &crate::policy::TrustedSourceContext,
+) -> Result<(), AppError> {
+    crate::policy::validate_trusted_source(source)
+        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO trusted_source_events(
+            delivery_id,installation_id,repository_id,repository,source_ref,source_commit_sha,observed_at
+        ) VALUES(?,?,?,?,?,?,?)"#,
+    )
+    .bind(&source.delivery_id)
+    .bind(source.installation_id)
+    .bind(source.repository_id)
+    .bind(&source.repository)
+    .bind(&source.source_ref)
+    .bind(source.source_commit_sha.to_ascii_lowercase())
+    .bind(now_rfc3339())
+    .execute(pool)
+    .await?;
+
+    let stored = trusted_source_by_delivery(pool, &source.delivery_id)
+        .await?
+        .ok_or_else(|| AppError::Conflict("trusted source event disappeared after insert".into()))?;
+    if stored != *source {
+        return Err(AppError::Conflict(
+            "delivery_id was already bound to different trusted source facts".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub async fn trusted_source_for_commit(
+    pool: &SqlitePool,
+    installation_id: i64,
+    repository_id: i64,
+    source_commit_sha: &str,
+) -> Result<Option<crate::policy::TrustedSourceContext>, AppError> {
+    let row: Option<(String, i64, i64, String, String, String)> = sqlx::query_as(
+        r#"SELECT delivery_id,installation_id,repository_id,repository,source_ref,source_commit_sha
+           FROM trusted_source_events
+           WHERE installation_id=? AND repository_id=? AND source_commit_sha=?
+           ORDER BY observed_at DESC LIMIT 1"#,
+    )
+    .bind(installation_id)
+    .bind(repository_id)
+    .bind(source_commit_sha.to_ascii_lowercase())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)| {
+        crate::policy::TrustedSourceContext {
+            installation_id,
+            repository_id,
+            repository,
+            source_ref,
+            source_commit_sha,
+            delivery_id,
+        }
+    }))
+}
+
+async fn trusted_source_by_delivery(
+    pool: &SqlitePool,
+    delivery_id: &str,
+) -> Result<Option<crate::policy::TrustedSourceContext>, AppError> {
+    let row: Option<(String, i64, i64, String, String, String)> = sqlx::query_as(
+        r#"SELECT delivery_id,installation_id,repository_id,repository,source_ref,source_commit_sha
+           FROM trusted_source_events WHERE delivery_id=? LIMIT 1"#,
+    )
+    .bind(delivery_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)| {
+        crate::policy::TrustedSourceContext {
+            installation_id,
+            repository_id,
+            repository,
+            source_ref,
+            source_commit_sha,
+            delivery_id,
+        }
+    }))
+}
+
+fn policy_from_row(row: ReleasePolicyRow) -> Result<crate::policy::ReleasePolicy, AppError> {
+    let ref_rule = match row.ref_rule.as_str() {
+        "exact" => crate::policy::RefRuleKind::Exact,
+        "prefix" => crate::policy::RefRuleKind::Prefix,
+        _ => {
+            return Err(AppError::Conflict(
+                "stored release policy has invalid ref rule".into(),
+            ));
+        }
+    };
+    let policy = crate::policy::ReleasePolicy::new(crate::policy::ReleasePolicySpec {
+        installation_id: row.installation_id,
+        repository_id: row.repository_id,
+        repository: row.repository,
+        ref_rule,
+        ref_value: row.ref_value,
+        signer_repository: row.signer_repository,
+        signer_workflow_path: row.signer_workflow_path,
+        signer_revision_sha: row.signer_revision_sha,
+    })
+    .map_err(|error| AppError::Conflict(format!("stored release policy is invalid: {error}")))?;
+    if policy.policy_sha256 != row.policy_sha256 {
+        return Err(AppError::Conflict(
+            "stored release policy hash does not match canonical content".into(),
+        ));
+    }
+    Ok(policy)
+}
