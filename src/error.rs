@@ -17,6 +17,8 @@ pub enum AppError {
     NotFound,
     #[error("database error")]
     Database(#[from] sqlx::Error),
+    #[error("internal error: {0}")]
+    Internal(&'static str),
 }
 
 impl IntoResponse for AppError {
@@ -30,7 +32,7 @@ impl IntoResponse for AppError {
             Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, "bad_request", msg.clone()),
             Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "not found".to_owned()),
-            Self::Database(_) => {
+            Self::Database(_) | Self::Internal(_) => {
                 tracing::error!(error = %self, "request failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -40,5 +42,24 @@ impl IntoResponse for AppError {
             }
         };
         (status, Json(json!({"error": code, "message": message}))).into_response()
+    }
+}
+
+impl AppError {
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(self, Self::Database(_) | Self::Internal(_))
+    }
+
+    #[must_use]
+    pub fn stable_code(&self) -> &'static str {
+        match self {
+            Self::Unauthorized => "unauthorized",
+            Self::BadRequest(_) => "bad_request",
+            Self::Conflict(_) => "conflict",
+            Self::NotFound => "not_found",
+            Self::Database(_) => "database",
+            Self::Internal(_) => "internal",
+        }
     }
 }

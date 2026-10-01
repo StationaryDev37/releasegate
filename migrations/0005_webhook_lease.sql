@@ -9,7 +9,7 @@ ALTER TABLE webhook_deliveries
 ADD COLUMN lease_expires_unix INTEGER;
 
 ALTER TABLE webhook_deliveries
-ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count >= 1);
+ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 1 CHECK(attempt_count >= 0);
 
 ALTER TABLE webhook_deliveries
 ADD COLUMN last_error_code TEXT;

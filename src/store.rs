@@ -1,5 +1,6 @@
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use time::OffsetDateTime;
+use uuid::Uuid;
 
 use crate::{error::AppError, model::Receipt};
 
@@ -9,23 +10,184 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
     Ok(pool)
 }
 
-pub fn now_rfc3339() -> String {
-    OffsetDateTime::now_utc().format(&time::format_description::well_known::Rfc3339)
-        .expect("RFC3339 formatting is infallible for OffsetDateTime")
+pub fn now_rfc3339() -> Result<String, AppError> {
+    OffsetDateTime::now_utc()
+        .format(&time::format_description::well_known::Rfc3339)
+        .map_err(|_| AppError::Internal("failed to format UTC timestamp"))
 }
 
-pub async fn claim_delivery(pool: &SqlitePool, source: &str, delivery_id: &str, event_type: &str, payload_sha256: &str) -> Result<bool, AppError> {
-    let result = sqlx::query("INSERT OR IGNORE INTO webhook_deliveries(source,delivery_id,event_type,payload_sha256,received_at) VALUES(?,?,?,?,?)")
-        .bind(source).bind(delivery_id).bind(event_type).bind(payload_sha256).bind(now_rfc3339())
-        .execute(pool).await?;
-    Ok(result.rows_affected() == 1)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeliveryLease {
+    Acquired { token: String, attempt: i64 },
+    DuplicateApplied,
+    DuplicateRejected,
+    InFlight,
+}
+
+pub async fn lease_delivery(
+    pool: &SqlitePool,
+    source: &str,
+    delivery_id: &str,
+    event_type: &str,
+    payload_sha256: &str,
+    lease_seconds: i64,
+) -> Result<DeliveryLease, AppError> {
+    if lease_seconds < 5 {
+        return Err(AppError::Internal("delivery lease duration is below safety floor"));
+    }
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let received_at = now_rfc3339()?;
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO webhook_deliveries(
+            source,delivery_id,event_type,payload_sha256,received_at,state,attempt_count
+        ) VALUES(?,?,?,?,?,'received',0)"#,
+    )
+    .bind(source)
+    .bind(delivery_id)
+    .bind(event_type)
+    .bind(payload_sha256)
+    .bind(received_at)
+    .execute(pool)
+    .await?;
+
+    let identity: (String, String) = sqlx::query_as(
+        "SELECT event_type,payload_sha256 FROM webhook_deliveries WHERE source=? AND delivery_id=?",
+    )
+    .bind(source)
+    .bind(delivery_id)
+    .fetch_one(pool)
+    .await?;
+    if identity.0 != event_type || identity.1 != payload_sha256 {
+        return Err(AppError::Conflict(
+            "delivery id was replayed with different authenticated bytes or event type".into(),
+        ));
+    }
+
+    let token = Uuid::new_v4().simple().to_string();
+    let expires = now.saturating_add(lease_seconds);
+    let update = sqlx::query(
+        r#"UPDATE webhook_deliveries
+           SET state='leased',lease_token=?,lease_expires_unix=?,attempt_count=attempt_count+1,
+               last_error_code=NULL,completed_at=NULL
+           WHERE source=? AND delivery_id=?
+             AND (state='received' OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))"#,
+    )
+    .bind(&token)
+    .bind(expires)
+    .bind(source)
+    .bind(delivery_id)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    if update.rows_affected() == 1 {
+        let attempt: i64 = sqlx::query_scalar(
+            "SELECT attempt_count FROM webhook_deliveries WHERE source=? AND delivery_id=?",
+        )
+        .bind(source)
+        .bind(delivery_id)
+        .fetch_one(pool)
+        .await?;
+        return Ok(DeliveryLease::Acquired { token, attempt });
+    }
+
+    let state: String = sqlx::query_scalar(
+        "SELECT state FROM webhook_deliveries WHERE source=? AND delivery_id=?",
+    )
+    .bind(source)
+    .bind(delivery_id)
+    .fetch_one(pool)
+    .await?;
+    match state.as_str() {
+        "applied" => Ok(DeliveryLease::DuplicateApplied),
+        "rejected" => Ok(DeliveryLease::DuplicateRejected),
+        "leased" | "received" => Ok(DeliveryLease::InFlight),
+        _ => Err(AppError::Conflict("stored delivery has invalid state".into())),
+    }
+}
+
+pub async fn complete_delivery(
+    pool: &SqlitePool,
+    source: &str,
+    delivery_id: &str,
+    lease_token: &str,
+) -> Result<(), AppError> {
+    transition_delivery(pool, source, delivery_id, lease_token, "applied", None).await
+}
+
+pub async fn reject_delivery(
+    pool: &SqlitePool,
+    source: &str,
+    delivery_id: &str,
+    lease_token: &str,
+    error_code: &str,
+) -> Result<(), AppError> {
+    transition_delivery(
+        pool,
+        source,
+        delivery_id,
+        lease_token,
+        "rejected",
+        Some(error_code),
+    )
+    .await
+}
+
+pub async fn release_delivery(
+    pool: &SqlitePool,
+    source: &str,
+    delivery_id: &str,
+    lease_token: &str,
+    error_code: &str,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"UPDATE webhook_deliveries
+           SET state='received',lease_token=NULL,lease_expires_unix=NULL,last_error_code=?
+           WHERE source=? AND delivery_id=? AND state='leased' AND lease_token=?"#,
+    )
+    .bind(error_code)
+    .bind(source)
+    .bind(delivery_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict("delivery lease ownership was lost".into()));
+    }
+    Ok(())
+}
+
+async fn transition_delivery(
+    pool: &SqlitePool,
+    source: &str,
+    delivery_id: &str,
+    lease_token: &str,
+    state: &str,
+    error_code: Option<&str>,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"UPDATE webhook_deliveries
+           SET state=?,lease_token=NULL,lease_expires_unix=NULL,last_error_code=?,completed_at=?
+           WHERE source=? AND delivery_id=? AND state='leased' AND lease_token=?"#,
+    )
+    .bind(state)
+    .bind(error_code)
+    .bind(now_rfc3339()?)
+    .bind(source)
+    .bind(delivery_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict("delivery lease ownership was lost".into()));
+    }
+    Ok(())
 }
 
 pub async fn upsert_installation(pool: &SqlitePool, installation_id: i64, account_id: i64, login: &str, account_type: &str, active: bool) -> Result<(), AppError> {
     sqlx::query(r#"INSERT INTO installations(installation_id,github_account_id,account_login,account_type,active,updated_at)
         VALUES(?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET github_account_id=excluded.github_account_id,
         account_login=excluded.account_login, account_type=excluded.account_type, active=excluded.active, updated_at=excluded.updated_at"#)
-        .bind(installation_id).bind(account_id).bind(login).bind(account_type).bind(if active { 1_i64 } else { 0_i64 }).bind(now_rfc3339())
+        .bind(installation_id).bind(account_id).bind(login).bind(account_type).bind(if active { 1_i64 } else { 0_i64 }).bind(now_rfc3339()?)
         .execute(pool).await?;
     Ok(())
 }
@@ -36,7 +198,7 @@ pub async fn upsert_subscription(pool: &SqlitePool, account_id: i64, login: &str
         VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(github_account_id) DO UPDATE SET account_login=excluded.account_login,
         plan_id=excluded.plan_id, plan_name=excluded.plan_name, billing_cycle=excluded.billing_cycle,
         unit_count=excluded.unit_count, status=excluded.status, effective_at=excluded.effective_at, updated_at=excluded.updated_at"#)
-        .bind(account_id).bind(login).bind(plan_id).bind(plan_name).bind(billing_cycle).bind(unit_count).bind(status).bind(effective_at).bind(now_rfc3339())
+        .bind(account_id).bind(login).bind(plan_id).bind(plan_name).bind(billing_cycle).bind(unit_count).bind(status).bind(effective_at).bind(now_rfc3339()?)
         .execute(pool).await?;
     Ok(())
 }
@@ -93,7 +255,7 @@ pub async fn get_receipt(pool: &SqlitePool, receipt_id: &str) -> Result<Option<R
 
 pub async fn record_usage(pool: &SqlitePool, installation_id: i64, metric: &str, source_key: &str, repository: Option<&str>) -> Result<(), AppError> {
     sqlx::query("INSERT OR IGNORE INTO usage_events(installation_id,metric,quantity,source_key,repository,occurred_at) VALUES(?,?,?,?,?,?)")
-        .bind(installation_id).bind(metric).bind(1_i64).bind(source_key).bind(repository).bind(now_rfc3339())
+        .bind(installation_id).bind(metric).bind(1_i64).bind(source_key).bind(repository).bind(now_rfc3339()?)
         .execute(pool).await?;
     Ok(())
 }
@@ -127,7 +289,7 @@ pub async fn store_attestation_bundle(
     .bind(artifact_sha256.to_ascii_lowercase())
     .bind(source_url_sha256)
     .bind(raw_json)
-    .bind(now_rfc3339())
+    .bind(now_rfc3339()?)
     .bind(initiator)
     .bind(transport_encoding)
     .bind(wire_sha256)
@@ -169,7 +331,7 @@ pub async fn store_release_policy(
     .bind(&policy.signer_repository)
     .bind(&policy.signer_workflow_path)
     .bind(&policy.signer_revision_sha)
-    .bind(now_rfc3339())
+    .bind(now_rfc3339()?)
     .execute(pool)
     .await?;
 
@@ -220,7 +382,7 @@ pub async fn activate_release_policy(
     .bind(policy.installation_id)
     .bind(policy.repository_id)
     .bind(&policy.policy_sha256)
-    .bind(now_rfc3339())
+    .bind(now_rfc3339()?)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -263,7 +425,7 @@ pub async fn record_trusted_source_event(
     .bind(&source.repository)
     .bind(&source.source_ref)
     .bind(source.source_commit_sha.to_ascii_lowercase())
-    .bind(now_rfc3339())
+    .bind(now_rfc3339()?)
     .execute(pool)
     .await?;
 

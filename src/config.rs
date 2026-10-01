@@ -2,13 +2,19 @@ use std::{env, net::SocketAddr};
 
 use anyhow::{Context, Result};
 
-#[derive(Clone, Debug)]
+use crate::secret::Secret;
+
+#[derive(Clone)]
 pub struct Config {
     pub bind: SocketAddr,
     pub database_url: String,
-    pub github_app_webhook_secret: String,
-    pub github_marketplace_webhook_secret: String,
-    pub ingest_token: String,
+    pub github_app_webhook_secret: Secret,
+    pub github_marketplace_webhook_secret: Secret,
+    pub control_token: Secret,
+    pub evaluator_token: Secret,
+    pub auditor_token: Secret,
+    pub delivery_lease_seconds: i64,
+    pub bundle_host: String,
 }
 
 impl Config {
@@ -19,30 +25,56 @@ impl Config {
             .context("invalid RELEASEGATE_BIND")?;
         let database_url = env::var("RELEASEGATE_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://releasegate.db?mode=rwc".to_owned());
-        let github_app_webhook_secret = required("RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET")?;
-        let github_marketplace_webhook_secret = required("RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET")?;
-        let ingest_token = required("RELEASEGATE_INGEST_TOKEN")?;
-
-        for (name, secret) in [
-            ("RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET", &github_app_webhook_secret),
-            ("RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET", &github_marketplace_webhook_secret),
-            ("RELEASEGATE_INGEST_TOKEN", &ingest_token),
-        ] {
-            if secret.len() < 32 {
-                anyhow::bail!("{name} must be at least 32 bytes");
-            }
+        let github_app_webhook_secret = required_secret("RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET")?;
+        let github_marketplace_webhook_secret =
+            required_secret("RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET")?;
+        let control_token = required_secret("RELEASEGATE_CONTROL_TOKEN")?;
+        let evaluator_token = required_secret("RELEASEGATE_EVALUATOR_TOKEN")?;
+        let auditor_token = required_secret("RELEASEGATE_AUDITOR_TOKEN")?;
+        let delivery_lease_seconds = env::var("RELEASEGATE_DELIVERY_LEASE_SECONDS")
+            .unwrap_or_else(|_| "120".to_owned())
+            .parse::<i64>()
+            .context("invalid RELEASEGATE_DELIVERY_LEASE_SECONDS")?;
+        if !(30..=900).contains(&delivery_lease_seconds) {
+            anyhow::bail!("RELEASEGATE_DELIVERY_LEASE_SECONDS must be between 30 and 900");
         }
+        let bundle_host = env::var("RELEASEGATE_GITHUB_BUNDLE_HOST")
+            .context("missing required environment variable RELEASEGATE_GITHUB_BUNDLE_HOST")?;
+        validate_hostname(&bundle_host)?;
 
         Ok(Self {
             bind,
             database_url,
             github_app_webhook_secret,
             github_marketplace_webhook_secret,
-            ingest_token,
+            control_token,
+            evaluator_token,
+            auditor_token,
+            delivery_lease_seconds,
+            bundle_host,
         })
     }
 }
 
-fn required(name: &str) -> Result<String> {
-    env::var(name).with_context(|| format!("missing required environment variable {name}"))
+fn required_secret(name: &str) -> Result<Secret> {
+    let value = env::var(name).with_context(|| format!("missing required environment variable {name}"))?;
+    Secret::new(value).map_err(|reason| anyhow::anyhow!("{name}: {reason}"))
+}
+
+fn validate_hostname(host: &str) -> Result<()> {
+    if host.is_empty()
+        || host.len() > 253
+        || host.eq_ignore_ascii_case("localhost")
+        || host.parse::<std::net::IpAddr>().is_ok()
+        || host.split('.').any(|label| {
+            label.is_empty()
+                || label.len() > 63
+                || label.starts_with('-')
+                || label.ends_with('-')
+                || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+    {
+        anyhow::bail!("RELEASEGATE_GITHUB_BUNDLE_HOST is not a valid DNS hostname");
+    }
+    Ok(())
 }
