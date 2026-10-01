@@ -32,7 +32,7 @@ pub const fn compose(truth: EvidenceTruth, authorization: PolicyAuthorization) -
 
     match (truth, authorization) {
         (Verified, Allow) => Release,
-        (Verified, Deny) | (Invalid, _) | (_, Deny) => Block,
+        (Invalid, _) | (_, Deny) => Block,
         (Verified, PolicyUnknown)
         | (TruthUnknown, Allow)
         | (TruthUnknown, PolicyUnknown) => Hold,

@@ -1,0 +1,14 @@
+{
+  "schema": "releasegate-evaluation-v1",
+  "installation_id": 42,
+  "repository_id": 99,
+  "repository": "acme/widget",
+  "source_delivery_id": "delivery-1",
+  "source_ref": "refs/tags/v1.2.3",
+  "source_commit_sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "policy_sha256": "6bc707d83af54b493743d2f7ba4eb287302d8ce5cdfab99550421fb0880cefc1",
+  "artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "trust_snapshot_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "verifier_build_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "evaluation_id": "rge_1f6f385e648dfa4c7d2eca4478bb88e8fba7adf28686313fd751e2e8204c2183"
+}

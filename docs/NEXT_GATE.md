@@ -1,26 +1,16 @@
-# Next Gate: v0.4 verification orchestration + SBOM commitment
+# Next closure gate
 
-v0.1 is immutable. v0.2 verifies GitHub provenance. v0.3 generates the verifier expectation from trusted source context and immutable organization policy.
+Do not add SBOM, Check Runs, dashboard, billing expansion, or another provider yet.
 
-The next gate closes the live decision path without adding UI or billing scope:
+The next gate is execution closure for this bedrock branch:
 
-1. Wire GitHub App credentials/API client into application state.
-2. Resolve exact trusted source `(installation, repo, commit, ref)` and active policy.
-3. Generate `ProvenanceExpectation` from v0.3 policy resolution.
-4. Retrieve/store attestation bundles using the v0.2 bounded GitHub path.
-5. Run v0.2 provenance verification with the v0.3 expectation.
-6. Parse supported SBOM evidence (CycloneDX/SPDX) with strict size/resource limits.
-7. Produce a deterministic canonical SBOM/dependency commitment.
-8. Compose provenance + SBOM + policy into the release decision input.
+1. Produce and review `Cargo.lock` using the pinned Rust toolchain.
+2. `cargo fmt --all -- --check`.
+3. `RUSTFLAGS='-D warnings' cargo check --locked --all-targets --all-features`.
+4. `cargo clippy --locked --all-targets --all-features -- -D warnings`.
+5. `cargo test --locked --all-targets --all-features`.
+6. `cargo build --locked --release` and record binary SHA-256.
+7. Execute a signed GitHub push webhook, force a mid-delivery process kill, restart, and prove the durable inbox re-hashes + re-verifies HMAC before idempotently applying the event and reaching one terminal state.
+8. Execute a live installation-token + attestation retrieval + supported provenance verification roundtrip.
 
-Stop there.
-
-Still out of scope for this gate:
-
-- GitHub Check Runs
-- receipt signing/integration changes
-- Marketplace/AWS billing changes
-- dashboard/UI
-- generalized multi-provider provenance
-
-Release predicate remains: `cargo fmt --check` + compile + Clippy `-D warnings` + Rust tests + static gate + live signed webhook roundtrip + live installation-token/attestation roundtrip.
+Only after those predicates pass does SBOM commitment become the next engineering slice.

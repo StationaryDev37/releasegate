@@ -1,11 +1,7 @@
-.PHONY: check test run
-check:
-	cargo fmt --all -- --check
-	cargo clippy --all-targets --all-features -- -D warnings
-	cargo test --all-targets
+.PHONY: bedrock-static rust-gate
 
-test:
-	cargo test --all-targets
+bedrock-static:
+	python3 scripts/static_gate.py
 
-run:
-	cargo run --release
+rust-gate:
+	./scripts/rust_gate.sh

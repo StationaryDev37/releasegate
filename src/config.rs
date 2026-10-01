@@ -8,6 +8,8 @@ use crate::secret::Secret;
 pub struct Config {
     pub bind: SocketAddr,
     pub database_url: String,
+    pub github_app_id: u64,
+    pub github_app_private_key_pem: Secret,
     pub github_app_webhook_secret: Secret,
     pub github_marketplace_webhook_secret: Secret,
     pub control_token: Secret,
@@ -25,6 +27,14 @@ impl Config {
             .context("invalid RELEASEGATE_BIND")?;
         let database_url = env::var("RELEASEGATE_DATABASE_URL")
             .unwrap_or_else(|_| "sqlite://releasegate.db?mode=rwc".to_owned());
+        let github_app_id = env::var("RELEASEGATE_GITHUB_APP_ID")
+            .context("missing required environment variable RELEASEGATE_GITHUB_APP_ID")?
+            .parse::<u64>()
+            .context("invalid RELEASEGATE_GITHUB_APP_ID")?;
+        if github_app_id == 0 {
+            anyhow::bail!("RELEASEGATE_GITHUB_APP_ID must be positive");
+        }
+        let github_app_private_key_pem = required_secret("RELEASEGATE_GITHUB_APP_PRIVATE_KEY_PEM")?;
         let github_app_webhook_secret = required_secret("RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET")?;
         let github_marketplace_webhook_secret =
             required_secret("RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET")?;
@@ -45,6 +55,8 @@ impl Config {
         Ok(Self {
             bind,
             database_url,
+            github_app_id,
+            github_app_private_key_pem,
             github_app_webhook_secret,
             github_marketplace_webhook_secret,
             control_token,

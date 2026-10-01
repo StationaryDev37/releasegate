@@ -1,3 +1,9 @@
+CREATE UNIQUE INDEX IF NOT EXISTS idx_trusted_source_identity
+ON trusted_source_events(delivery_id,installation_id,repository_id,repository,source_ref,source_commit_sha);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_repository_identity
+ON release_policy_versions(policy_sha256,installation_id,repository_id,repository);
+
 CREATE TABLE IF NOT EXISTS evaluation_contexts (
     evaluation_id TEXT PRIMARY KEY,
     installation_id INTEGER NOT NULL CHECK(installation_id > 0),
@@ -13,9 +19,11 @@ CREATE TABLE IF NOT EXISTS evaluation_contexts (
     created_at TEXT NOT NULL,
     UNIQUE(installation_id, repository_id, source_delivery_id, policy_sha256, artifact_sha256,
            trust_snapshot_sha256, verifier_build_sha256),
-    FOREIGN KEY(source_delivery_id) REFERENCES trusted_source_events(delivery_id) ON DELETE RESTRICT,
-    FOREIGN KEY(policy_sha256, installation_id, repository_id)
-      REFERENCES release_policy_versions(policy_sha256, installation_id, repository_id)
+    FOREIGN KEY(source_delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)
+      REFERENCES trusted_source_events(delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)
+      ON DELETE RESTRICT,
+    FOREIGN KEY(policy_sha256, installation_id, repository_id, repository)
+      REFERENCES release_policy_versions(policy_sha256, installation_id, repository_id, repository)
       ON DELETE RESTRICT
 );
 

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::provenance::ProvenanceExpectation;
+use crate::{decision::PolicyAuthorization, provenance::ProvenanceExpectation};
 
 const POLICY_VERSION: u8 = 1;
 
@@ -58,20 +58,12 @@ pub struct TrustedSourceContext {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(tag = "status", rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PolicyResolution {
-    Eligible {
-        policy_sha256: String,
-        expectation: ProvenanceExpectation,
-    },
-    Rejected {
-        policy_sha256: String,
-        reason: &'static str,
-    },
-    Indeterminate {
-        policy_sha256: Option<String>,
-        reason: &'static str,
-    },
+pub struct PolicyResolution {
+    pub authorization: PolicyAuthorization,
+    pub policy_sha256: Option<String>,
+    pub reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expectation: Option<ProvenanceExpectation>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -118,34 +110,44 @@ impl ReleasePolicy {
 
     pub fn resolve(&self, source: &TrustedSourceContext) -> PolicyResolution {
         if validate_trusted_source(source).is_err() {
-            return PolicyResolution::Indeterminate {
+            return PolicyResolution {
+                authorization: PolicyAuthorization::Indeterminate,
                 policy_sha256: Some(self.policy_sha256.clone()),
                 reason: "trusted_source_context_invalid",
+                expectation: None,
             };
         }
 
         if source.installation_id != self.installation_id {
-            return PolicyResolution::Indeterminate {
+            return PolicyResolution {
+                authorization: PolicyAuthorization::Indeterminate,
                 policy_sha256: Some(self.policy_sha256.clone()),
                 reason: "installation_identity_mismatch",
+                expectation: None,
             };
         }
         if source.repository_id != self.repository_id || source.repository != self.repository {
-            return PolicyResolution::Indeterminate {
+            return PolicyResolution {
+                authorization: PolicyAuthorization::Indeterminate,
                 policy_sha256: Some(self.policy_sha256.clone()),
                 reason: "repository_identity_mismatch",
+                expectation: None,
             };
         }
         if !self.ref_allows(&source.source_ref) {
-            return PolicyResolution::Rejected {
-                policy_sha256: self.policy_sha256.clone(),
+            return PolicyResolution {
+                authorization: PolicyAuthorization::Deny,
+                policy_sha256: Some(self.policy_sha256.clone()),
                 reason: "source_ref_not_allowed",
+                expectation: None,
             };
         }
 
-        PolicyResolution::Eligible {
-            policy_sha256: self.policy_sha256.clone(),
-            expectation: ProvenanceExpectation {
+        PolicyResolution {
+            authorization: PolicyAuthorization::Allow,
+            policy_sha256: Some(self.policy_sha256.clone()),
+            reason: "source_and_signer_policy_bound",
+            expectation: Some(ProvenanceExpectation {
                 source_repository: source.repository.clone(),
                 source_repository_id: source.repository_id as u64,
                 source_ref: source.source_ref.clone(),
@@ -153,7 +155,7 @@ impl ReleasePolicy {
                 signer_repository: self.signer_repository.clone(),
                 signer_workflow_path: self.signer_workflow_path.clone(),
                 signer_revision_sha: self.signer_revision_sha.clone(),
-            },
+            }),
         }
     }
 
@@ -267,11 +269,11 @@ fn policy_hash(spec: &ReleasePolicySpec) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PolicyResolution, RefRuleKind, ReleasePolicy, ReleasePolicySpec, TrustedSourceContext,
-    };
+    use crate::decision::PolicyAuthorization;
 
-    fn policy() -> ReleasePolicy {
+    use super::{RefRuleKind, ReleasePolicy, ReleasePolicySpec, TrustedSourceContext};
+
+    fn policy() -> Result<ReleasePolicy, super::PolicyError> {
         ReleasePolicy::new(ReleasePolicySpec {
             installation_id: 42,
             repository_id: 99,
@@ -282,7 +284,6 @@ mod tests {
             signer_workflow_path: ".github/workflows/release.yml".into(),
             signer_revision_sha: "a".repeat(40),
         })
-        .expect("valid policy")
     }
 
     fn source(git_ref: &str) -> TrustedSourceContext {
@@ -297,15 +298,16 @@ mod tests {
     }
 
     #[test]
-    fn canonical_policy_hash_matches_independent_vector() {
+    fn canonical_policy_hash_matches_independent_vector() -> Result<(), super::PolicyError> {
         assert_eq!(
-            policy().policy_sha256,
+            policy()?.policy_sha256,
             "6bc707d83af54b493743d2f7ba4eb287302d8ce5cdfab99550421fb0880cefc1"
         );
+        Ok(())
     }
 
     #[test]
-    fn exact_ref_rule_does_not_accept_prefix_extensions() {
+    fn exact_ref_rule_does_not_accept_prefix_extensions() -> Result<(), super::PolicyError> {
         let exact = ReleasePolicy::new(ReleasePolicySpec {
             installation_id: 42,
             repository_id: 99,
@@ -315,53 +317,33 @@ mod tests {
             signer_repository: "acme/release-workflows".into(),
             signer_workflow_path: ".github/workflows/release.yml".into(),
             signer_revision_sha: "a".repeat(40),
-        })
-        .expect("valid policy");
-        assert!(matches!(
-            exact.resolve(&source("refs/tags/v1.2.30")),
-            PolicyResolution::Rejected {
-                reason: "source_ref_not_allowed",
-                ..
-            }
-        ));
+        })?;
+        let result = exact.resolve(&source("refs/tags/v1.2.30"));
+        assert_eq!(result.authorization, PolicyAuthorization::Deny);
+        assert_eq!(result.reason, "source_ref_not_allowed");
+        assert!(result.expectation.is_none());
+        Ok(())
     }
 
     #[test]
-    fn allowed_source_generates_exact_provenance_expectation() {
-        let result = policy().resolve(&source("refs/tags/v1.2.3"));
-        match result {
-            PolicyResolution::Eligible { expectation, .. } => {
-                assert_eq!(expectation.source_ref, "refs/tags/v1.2.3");
-                assert_eq!(expectation.source_commit_sha, "b".repeat(40));
-                assert_eq!(expectation.signer_repository, "acme/release-workflows");
-            }
-            other => panic!("unexpected policy resolution: {other:?}"),
-        }
+    fn allowed_source_generates_exact_provenance_expectation() -> Result<(), super::PolicyError> {
+        let result = policy()?.resolve(&source("refs/tags/v1.2.3"));
+        assert_eq!(result.authorization, PolicyAuthorization::Allow);
+        let expectation = result.expectation.ok_or(super::PolicyError::InvalidSourceRef)?;
+        assert_eq!(expectation.source_ref, "refs/tags/v1.2.3");
+        assert_eq!(expectation.source_commit_sha, "b".repeat(40));
+        assert_eq!(expectation.signer_repository, "acme/release-workflows");
+        Ok(())
     }
 
     #[test]
-    fn disallowed_ref_is_rejected_not_indeterminate() {
-        let result = policy().resolve(&source("refs/heads/main"));
-        assert!(matches!(
-            result,
-            PolicyResolution::Rejected {
-                reason: "source_ref_not_allowed",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn identity_mismatch_is_indeterminate() {
+    fn identity_mismatch_is_indeterminate() -> Result<(), super::PolicyError> {
         let mut source = source("refs/tags/v1.2.3");
         source.repository_id = 100;
-        let result = policy().resolve(&source);
-        assert!(matches!(
-            result,
-            PolicyResolution::Indeterminate {
-                reason: "repository_identity_mismatch",
-                ..
-            }
-        ));
+        let result = policy()?.resolve(&source);
+        assert_eq!(result.authorization, PolicyAuthorization::Indeterminate);
+        assert_eq!(result.reason, "repository_identity_mismatch");
+        assert!(result.expectation.is_none());
+        Ok(())
     }
 }

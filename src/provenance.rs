@@ -4,9 +4,11 @@ use attestation_verify::{
     Verifier, WorkflowPath, WorkflowRevisionPolicy,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
 use crate::{
+    decision::EvidenceTruth,
     error::AppError,
     github::{GithubApi, GithubApiError, RawAttestationBundle},
     store,
@@ -19,6 +21,8 @@ use crate::{
 /// trusted origin configuration is deliberately updated.
 const PUBLIC_REKOR_V1_CHECKPOINT_ORIGIN: &str =
     "rekor.sigstore.dev - 1193050959916656506";
+const PUBLIC_REKOR_V1_KEY_SHA256: &str =
+    "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProvenanceGateError {
@@ -44,26 +48,22 @@ pub struct ProvenanceExpectation {
     pub signer_revision_sha: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum ProvenanceDecision {
-    Verified,
-    Rejected,
-    Indeterminate,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BundleVerification {
     pub bundle_sha256: String,
-    pub decision: ProvenanceDecision,
+    pub truth: EvidenceTruth,
     pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ProvenanceVerification {
-    pub decision: ProvenanceDecision,
+    pub truth: EvidenceTruth,
     pub reason: String,
     pub bundles: Vec<BundleVerification>,
+}
+
+pub fn embedded_trust_snapshot_sha256() -> Result<String, AttestationError> {
+    Ok(TrustStore::embedded_public_good()?.fingerprint)
 }
 
 pub async fn retrieve_and_store(
@@ -85,17 +85,19 @@ pub async fn retrieve_and_store(
     for bundle in &bundles {
         store::store_attestation_bundle(
             db,
-            installation_id,
-            repository_id,
-            repository,
-            artifact_sha256,
-            &bundle.initiator,
-            &bundle.source_url_sha256,
-            &bundle.transport_encoding,
-            &bundle.wire_sha256,
-            &bundle.wire_bytes,
-            &bundle.bundle_sha256,
-            &bundle.raw_json,
+            store::AttestationEvidenceRecord {
+                installation_id,
+                repository_id,
+                repository,
+                artifact_sha256,
+                initiator: &bundle.initiator,
+                source_url_sha256: &bundle.source_url_sha256,
+                transport_encoding: &bundle.transport_encoding,
+                wire_sha256: &bundle.wire_sha256,
+                wire_bytes: &bundle.wire_bytes,
+                bundle_sha256: &bundle.bundle_sha256,
+                raw_json: &bundle.raw_json,
+            },
         )
         .await?;
     }
@@ -107,7 +109,7 @@ pub async fn retrieve_and_store(
 /// Semantics are deliberately conservative:
 /// - VERIFIED: at least one bundle completes the entire Sigstore + GitHub
 ///   identity verification chain under the caller's exact policy.
-/// - REJECTED: every retrieved bundle is conclusively false because its DSSE
+/// - INVALID: every retrieved bundle is conclusively false because its DSSE
 ///   signature is cryptographically invalid.
 /// - INDETERMINATE: everything else (missing evidence, unsupported bundle/log,
 ///   parse error, certificate validity/trust failure, Rekor failure, policy
@@ -125,7 +127,7 @@ pub fn verify_provenance(
 ) -> ProvenanceVerification {
     if bundles.is_empty() {
         return ProvenanceVerification {
-            decision: ProvenanceDecision::Indeterminate,
+            truth: EvidenceTruth::Indeterminate,
             reason: "no_attestation_bundles".to_owned(),
             bundles: Vec::new(),
         };
@@ -201,7 +203,12 @@ fn build_verifier(expectation: &ProvenanceExpectation) -> Result<Verifier, Verif
     let trust_store = TrustStore::embedded_public_good()?;
     let rekor_log = trust_store
         .tlogs
-        .first()
+        .iter()
+        .find(|log| {
+            hex::encode(&log.log_id_key_id) == PUBLIC_REKOR_V1_KEY_SHA256
+                && hex::encode(Sha256::digest(&log.public_key.raw_bytes))
+                    == PUBLIC_REKOR_V1_KEY_SHA256
+        })
         .ok_or(VerifierBuildError::MissingRekorLog)?;
     let checkpoint_origin_policy = CheckpointOriginPolicy::builder()
         .allow_origin(rekor_log, PUBLIC_REKOR_V1_CHECKPOINT_ORIGIN)?
@@ -225,7 +232,7 @@ fn verify_one_bundle(
         Err(error) => {
             return BundleVerification {
                 bundle_sha256: raw.bundle_sha256.clone(),
-                decision: ProvenanceDecision::Indeterminate,
+                truth: EvidenceTruth::Indeterminate,
                 reason: format!("bundle_parse:{}", stable_error_class(&error)),
             };
         }
@@ -234,40 +241,40 @@ fn verify_one_bundle(
     match verifier.verify_digest(subject, &bundle) {
         Ok(_) => BundleVerification {
             bundle_sha256: raw.bundle_sha256.clone(),
-            decision: ProvenanceDecision::Verified,
+            truth: EvidenceTruth::Verified,
             reason: "full_sigstore_chain_and_github_identity_verified".to_owned(),
         },
         Err(error) => {
-            let decision = classify_verification_error(&error);
+            let truth = classify_verification_error(&error);
             BundleVerification {
                 bundle_sha256: raw.bundle_sha256.clone(),
-                decision,
+                truth,
                 reason: stable_error_class(&error).to_owned(),
             }
         }
     }
 }
 
-fn classify_verification_error(error: &AttestationError) -> ProvenanceDecision {
+fn classify_verification_error(error: &AttestationError) -> EvidenceTruth {
     // Deliberately narrow: only the attestation's own DSSE signature failing
-    // cryptographic verification is conclusive enough for REJECTED in v0.2.
+    // cryptographic verification is conclusive enough for INVALID evidence.
     // Certificate-chain, Rekor, timestamp, trust, unsupported, parsing and
     // policy failures all remain INDETERMINATE.
     match error {
         AttestationError::ContentBinding(ContentBindingError::DsseSignatureInvalid) => {
-            ProvenanceDecision::Rejected
+            EvidenceTruth::Invalid
         }
-        _ => ProvenanceDecision::Indeterminate,
+        _ => EvidenceTruth::Indeterminate,
     }
 }
 
 fn aggregate(outcomes: Vec<BundleVerification>) -> ProvenanceVerification {
     if outcomes
         .iter()
-        .any(|outcome| outcome.decision == ProvenanceDecision::Verified)
+        .any(|outcome| outcome.truth == EvidenceTruth::Verified)
     {
         return ProvenanceVerification {
-            decision: ProvenanceDecision::Verified,
+            truth: EvidenceTruth::Verified,
             reason: "at_least_one_attestation_verified".to_owned(),
             bundles: outcomes,
         };
@@ -276,17 +283,17 @@ fn aggregate(outcomes: Vec<BundleVerification>) -> ProvenanceVerification {
     if !outcomes.is_empty()
         && outcomes
             .iter()
-            .all(|outcome| outcome.decision == ProvenanceDecision::Rejected)
+            .all(|outcome| outcome.truth == EvidenceTruth::Invalid)
     {
         return ProvenanceVerification {
-            decision: ProvenanceDecision::Rejected,
+            truth: EvidenceTruth::Invalid,
             reason: "all_attestations_have_invalid_dsse_signatures".to_owned(),
             bundles: outcomes,
         };
     }
 
     ProvenanceVerification {
-        decision: ProvenanceDecision::Indeterminate,
+        truth: EvidenceTruth::Indeterminate,
         reason: "no_verified_attestation_and_truth_not_conclusively_false".to_owned(),
         bundles: outcomes,
     }
@@ -297,13 +304,13 @@ fn all_indeterminate(
     reason: String,
 ) -> ProvenanceVerification {
     ProvenanceVerification {
-        decision: ProvenanceDecision::Indeterminate,
+        truth: EvidenceTruth::Indeterminate,
         reason: reason.clone(),
         bundles: bundles
             .iter()
             .map(|bundle| BundleVerification {
                 bundle_sha256: bundle.bundle_sha256.clone(),
-                decision: ProvenanceDecision::Indeterminate,
+                truth: EvidenceTruth::Indeterminate,
                 reason: reason.clone(),
             })
             .collect(),
@@ -332,12 +339,13 @@ fn stable_error_class(error: &AttestationError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{aggregate, BundleVerification, ProvenanceDecision};
+    use super::{aggregate, BundleVerification};
+    use crate::decision::EvidenceTruth;
 
-    fn outcome(decision: ProvenanceDecision, id: &str) -> BundleVerification {
+    fn outcome(truth: EvidenceTruth, id: &str) -> BundleVerification {
         BundleVerification {
             bundle_sha256: id.to_owned(),
-            decision,
+            truth,
             reason: "test".to_owned(),
         }
     }
@@ -345,31 +353,31 @@ mod tests {
     #[test]
     fn verified_candidate_dominates_other_candidates() {
         let result = aggregate(vec![
-            outcome(ProvenanceDecision::Indeterminate, "a"),
-            outcome(ProvenanceDecision::Verified, "b"),
-            outcome(ProvenanceDecision::Rejected, "c"),
+            outcome(EvidenceTruth::Indeterminate, "a"),
+            outcome(EvidenceTruth::Verified, "b"),
+            outcome(EvidenceTruth::Invalid, "c"),
         ]);
-        assert_eq!(result.decision, ProvenanceDecision::Verified);
+        assert_eq!(result.truth, EvidenceTruth::Verified);
     }
 
     #[test]
     fn rejected_requires_every_candidate_to_be_conclusively_false() {
         let rejected = aggregate(vec![
-            outcome(ProvenanceDecision::Rejected, "a"),
-            outcome(ProvenanceDecision::Rejected, "b"),
+            outcome(EvidenceTruth::Invalid, "a"),
+            outcome(EvidenceTruth::Invalid, "b"),
         ]);
-        assert_eq!(rejected.decision, ProvenanceDecision::Rejected);
+        assert_eq!(rejected.truth, EvidenceTruth::Invalid);
 
         let mixed = aggregate(vec![
-            outcome(ProvenanceDecision::Rejected, "a"),
-            outcome(ProvenanceDecision::Indeterminate, "b"),
+            outcome(EvidenceTruth::Invalid, "a"),
+            outcome(EvidenceTruth::Indeterminate, "b"),
         ]);
-        assert_eq!(mixed.decision, ProvenanceDecision::Indeterminate);
+        assert_eq!(mixed.truth, EvidenceTruth::Indeterminate);
     }
 
     #[test]
     fn no_verified_candidate_is_indeterminate() {
-        let result = aggregate(vec![outcome(ProvenanceDecision::Indeterminate, "a")]);
-        assert_eq!(result.decision, ProvenanceDecision::Indeterminate);
+        let result = aggregate(vec![outcome(EvidenceTruth::Indeterminate, "a")]);
+        assert_eq!(result.truth, EvidenceTruth::Indeterminate);
     }
 }

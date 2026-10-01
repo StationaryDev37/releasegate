@@ -1,6 +1,6 @@
 use hmac::{Hmac, Mac};
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::Arc, time::Duration};
 
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT};
 use tokio::sync::RwLock;
@@ -160,16 +160,16 @@ pub struct RawAttestationBundle {
 #[derive(Clone)]
 pub struct GithubApi {
     client: reqwest::Client,
-    bundle_client: reqwest::Client,
     signer: Arc<GithubAppJwtSigner>,
     token_cache: Arc<RwLock<HashMap<(i64, i64), CachedInstallationToken>>>,
+    bundle_host: Arc<str>,
 }
 
 impl GithubApi {
-    pub fn new(signer: GithubAppJwtSigner) -> Result<Self, GithubApiError> {
+    pub fn new(signer: GithubAppJwtSigner, bundle_host: String) -> Result<Self, GithubApiError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
-        headers.insert(USER_AGENT, HeaderValue::from_static("releasegate/0.3"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("releasegate/0.3.1"));
         headers.insert(
             "x-github-api-version",
             HeaderValue::from_static(GITHUB_API_VERSION),
@@ -179,16 +179,17 @@ impl GithubApi {
             .timeout(Duration::from_secs(20))
             .build()
             .map_err(|_| GithubApiError::ClientBuild)?;
-        let bundle_client = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(20))
-            .build()
-            .map_err(|_| GithubApiError::ClientBuild)?;
+        if bundle_host.is_empty()
+            || bundle_host.eq_ignore_ascii_case("localhost")
+            || bundle_host.parse::<IpAddr>().is_ok()
+        {
+            return Err(GithubApiError::UnsafeBundleUrl);
+        }
         Ok(Self {
             client,
-            bundle_client,
             signer: Arc::new(signer),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
+            bundle_host: Arc::from(bundle_host),
         })
     }
 
@@ -316,10 +317,17 @@ impl GithubApi {
         const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
         let url = reqwest::Url::parse(&item.bundle_url)
             .map_err(|_| GithubApiError::UnsafeBundleUrl)?;
-        validate_bundle_url(&url)?;
+        validate_bundle_url(&url, self.bundle_host.as_ref())?;
+        let pinned_addr = resolve_public_bundle_addr(self.bundle_host.as_ref()).await?;
+        let bundle_client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(20))
+            .resolve(self.bundle_host.as_ref(), pinned_addr)
+            .build()
+            .map_err(|_| GithubApiError::ClientBuild)?;
         let source_url_sha256 = hex::encode(Sha256::digest(item.bundle_url.as_bytes()));
         let response = self
-            .bundle_client
+            bundle_client
             .get(url)
             .send()
             .await
@@ -400,21 +408,86 @@ fn valid_repo_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
 }
 
-fn validate_bundle_url(url: &reqwest::Url) -> Result<(), GithubApiError> {
+fn validate_bundle_url(url: &reqwest::Url, expected_host: &str) -> Result<(), GithubApiError> {
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
+        || url.port().is_some_and(|port| port != 443)
         || url.host_str().is_none()
     {
         return Err(GithubApiError::UnsafeBundleUrl);
     }
-    let host = url.host_str().expect("checked above");
-    if host.eq_ignore_ascii_case("localhost")
-        || host.parse::<std::net::IpAddr>().is_ok()
-    {
+    let Some(host) = url.host_str() else {
+        return Err(GithubApiError::UnsafeBundleUrl);
+    };
+    if !host.eq_ignore_ascii_case(expected_host) || host.parse::<IpAddr>().is_ok() {
         return Err(GithubApiError::UnsafeBundleUrl);
     }
     Ok(())
+}
+
+async fn resolve_public_bundle_addr(host: &str) -> Result<SocketAddr, GithubApiError> {
+    let mut addrs = tokio::net::lookup_host((host, 443))
+        .await
+        .map_err(|_| GithubApiError::Transport)?;
+    let mut selected = None;
+    let mut count = 0_u16;
+    for addr in &mut addrs {
+        count = count.saturating_add(1);
+        if count > 32 || !is_public_ip(addr.ip()) {
+            return Err(GithubApiError::UnsafeBundleUrl);
+        }
+        if selected.is_none() {
+            selected = Some(addr);
+        }
+    }
+    selected.ok_or(GithubApiError::UnsafeBundleUrl)
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let [a, b, c, _] = ip.octets();
+    if ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+    {
+        return false;
+    }
+    // Carrier-grade NAT, benchmarking, protocol-assignment/reserved and 0/8.
+    if a == 0
+        || (a == 100 && (64..=127).contains(&b))
+        || (a == 198 && (b == 18 || b == 19))
+        || (a == 192 && b == 0 && c == 0)
+        || a >= 240
+    {
+        return false;
+    }
+    true
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+        return false;
+    }
+    // fc00::/7 unique local, fe80::/10 link-local, 2001:db8::/32 documentation.
+    if (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+    {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
@@ -426,7 +499,8 @@ mod tests {
         pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
     };
 
-    use super::{GithubAppClaims, GithubAppJwtSigner, verify_webhook_signature};
+    use super::{GithubAppClaims, GithubAppJwtSigner, is_public_ip, validate_bundle_url, verify_webhook_signature};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
     fn accepts_known_github_vector() {
@@ -478,4 +552,29 @@ mod tests {
         assert_eq!(decoded.claims.exp, now + (9 * 60));
         assert!(decoded.claims.exp - decoded.claims.iat <= 10 * 60);
     }
+    #[test]
+    fn bundle_url_requires_exact_configured_host() {
+        let good = reqwest::Url::parse("https://attest.example.test/object.json").expect("url fixture");
+        assert!(validate_bundle_url(&good, "attest.example.test").is_ok());
+        let wrong = reqwest::Url::parse("https://evil.example.test/object.json").expect("url fixture");
+        assert!(validate_bundle_url(&wrong, "attest.example.test").is_err());
+    }
+
+    #[test]
+    fn bundle_egress_rejects_non_public_addresses() {
+        for ip in [
+            IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1)),
+            IpAddr::V4(Ipv4Addr::new(169, 254, 1, 1)),
+            IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+            "fc00::1".parse().expect("ipv6 fixture"),
+            "fe80::1".parse().expect("ipv6 fixture"),
+            "2001:db8::1".parse().expect("ipv6 fixture"),
+        ] {
+            assert!(!is_public_ip(ip));
+        }
+        assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
 }

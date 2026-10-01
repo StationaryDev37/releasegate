@@ -23,7 +23,7 @@ impl Secret {
     pub fn matches(&self, candidate: &str) -> bool {
         let expected = sha2::Sha256::digest(self.as_bytes());
         let provided = sha2::Sha256::digest(candidate.as_bytes());
-        bool::from(expected.as_slice().ct_eq(provided.as_slice()))
+        bool::from(expected.ct_eq(&provided))
     }
 }
 

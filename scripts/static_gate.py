@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Non-Rust preflight checks. This does NOT replace cargo fmt/clippy/test."""
+"""Independent non-Rust bedrock gate. It never substitutes for rust_gate.sh."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -15,14 +16,14 @@ ROOT = Path(__file__).resolve().parents[1]
 def digest_join(parts: list[str]) -> str:
     h = hashlib.sha256()
     for part in parts:
-        b = part.encode()
-        h.update(len(b).to_bytes(8, "big"))
-        h.update(b)
+        raw = part.encode()
+        h.update(len(raw).to_bytes(8, "big"))
+        h.update(raw)
     return h.hexdigest()
 
 
 def policy_hash(spec: dict[str, object]) -> str:
-    parts = [
+    return digest_join([
         "1",
         str(spec["installation_id"]),
         str(spec["repository_id"]),
@@ -32,74 +33,92 @@ def policy_hash(spec: dict[str, object]) -> str:
         str(spec["signer_repository"]),
         str(spec["signer_workflow_path"]),
         str(spec["signer_revision_sha"]).lower(),
-    ]
-    return digest_join(parts)
+    ])
+
+
+def evaluation_id(v: dict[str, object]) -> str:
+    return "rge_" + digest_join([
+        str(v["schema"]),
+        str(v["installation_id"]),
+        str(v["repository_id"]),
+        str(v["repository"]),
+        str(v["source_delivery_id"]),
+        str(v["source_ref"]),
+        str(v["source_commit_sha"]).lower(),
+        str(v["policy_sha256"]).lower(),
+        str(v["artifact_sha256"]).lower(),
+        str(v["trust_snapshot_sha256"]).lower(),
+        str(v["verifier_build_sha256"]).lower(),
+    ])
+
+
+def compose(truth: str, authorization: str) -> str:
+    if truth == "VERIFIED" and authorization == "ALLOW":
+        return "RELEASE"
+    if truth == "INVALID" or authorization == "DENY":
+        return "BLOCK"
+    return "HOLD"
 
 
 def main() -> None:
-    tomllib.loads((ROOT / "Cargo.toml").read_text())
-    for path in sorted((ROOT / "fixtures" / "github").glob("*.json")):
+    cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
+    assert cargo["package"]["version"] == "0.3.1"
+    assert cargo["dependencies"]["attestation-verify"] == "=0.1.0"
+    assert not (ROOT / ".env.example").exists()
+
+    for path in sorted((ROOT / "fixtures").rglob("*.json")):
         json.loads(path.read_text())
-    policy_fixture = json.loads((ROOT / "fixtures" / "policy" / "release-policy.json").read_text())
-    push_fixture = json.loads((ROOT / "fixtures" / "github" / "push-source.json").read_text())
 
     con = sqlite3.connect(":memory:")
     con.execute("PRAGMA foreign_keys = ON")
     for migration in sorted((ROOT / "migrations").glob("*.sql")):
         con.executescript(migration.read_text())
-    tables = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    tables = {row[0] for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     required = {
         "webhook_deliveries",
         "installations",
         "subscriptions",
-        "verification_receipts",
-        "usage_events",
         "attestation_bundles",
         "release_policy_versions",
         "active_release_policies",
         "trusted_source_events",
+        "evaluation_contexts",
     }
-    assert required <= tables, (required - tables)
+    assert required <= tables, required - tables
 
+    # GitHub webhook HMAC reference vector.
     secret = b"It's a Secret to Everybody"
     payload = b"Hello, World!"
     expected = "757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
-    assert hmac.new(secret, payload, hashlib.sha256).hexdigest() == expected
+    computed_signature = hmac.new(secret, payload, hashlib.sha256).hexdigest()
+    assert computed_signature == expected
+    signature_header = f"sha256={computed_signature}"
+    assert hmac.compare_digest(signature_header, f"sha256={expected}")
 
-    request_id = "job-123"
-    installation_id = 42
-    repo = "acme/widget"
-    commit = "a" * 40
-    artifact = "b" * 64
-    manifest = "c" * 64
-    policy = "d" * 64
-    evidence = digest_join([repo, commit, artifact, manifest, policy])
-    identity = digest_join([str(installation_id), request_id])
-    receipt_id = "rg_" + identity[:24]
-    receipt_sha = digest_join([
-        receipt_id,
-        str(installation_id),
-        request_id,
-        repo,
-        commit,
-        artifact,
-        manifest,
-        policy,
-        evidence,
-        "INDETERMINATE",
-        "EVIDENCE_COMMITTED_NOT_INDEPENDENTLY_VERIFIED",
-        "2026-09-29T20:00:00Z",
-    ])
-    assert receipt_id == "rg_0adf57dc816e6f82a95057ca"
-    assert evidence == "da35d57fa5e32595f427895268b5d8565225ec4524e08392838287a6d4e74272"
-    assert receipt_sha == "605d67c26e1353b5573bcbdf7d7fd27198bcca5c261d758dbbeef5fd8db2bac3"
+    # Exact Rekor v1 log id must equal SHA-256(SPKI), preventing list-order trust.
+    log_id = base64.b64decode("wNI9atQGlz+VWfO6LRygH4QUfY/8W4RFwiT5i5WRgB0=")
+    spki = base64.b64decode(
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwrkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw=="
+    )
+    assert hashlib.sha256(spki).digest() == log_id
+    assert log_id.hex() == "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d"
 
-    # Independent v0.3 policy commitment and persistence checks.
+    # Closed 3x3 decision law: exactly one state may RELEASE.
+    truths = ["VERIFIED", "INVALID", "INDETERMINATE"]
+    policies = ["ALLOW", "DENY", "INDETERMINATE"]
+    releases = [(t, p) for t in truths for p in policies if compose(t, p) == "RELEASE"]
+    assert releases == [("VERIFIED", "ALLOW")]
+    assert compose("INDETERMINATE", "DENY") == "BLOCK"
+    assert compose("VERIFIED", "INDETERMINATE") == "HOLD"
+
+    policy_fixture = json.loads((ROOT / "fixtures/policy/release-policy.json").read_text())
     p_hash = policy_hash(policy_fixture)
     assert p_hash == "6bc707d83af54b493743d2f7ba4eb287302d8ce5cdfab99550421fb0880cefc1"
+
     con.execute(
         "INSERT INTO installations VALUES(?,?,?,?,?,?)",
-        (42, 7001, "acme", "Organization", 1, "2026-09-29T21:59:59Z"),
+        (42, 7001, "acme", "Organization", 1, "2026-09-30T00:00:00Z"),
     )
     con.execute(
         """INSERT INTO release_policy_versions(
@@ -107,68 +126,167 @@ def main() -> None:
            signer_repository,signer_workflow_path,signer_revision_sha,created_at
            ) VALUES(?,?,?,?,?,?,?,?,?,?)""",
         (
-            p_hash,
-            policy_fixture["installation_id"],
-            policy_fixture["repository_id"],
-            policy_fixture["repository"],
-            policy_fixture["ref_rule"],
-            policy_fixture["ref_value"],
-            policy_fixture["signer_repository"],
-            policy_fixture["signer_workflow_path"],
-            policy_fixture["signer_revision_sha"],
-            "2026-09-29T22:00:00Z",
+            p_hash, 42, 99, "acme/widget", "prefix", "refs/tags/v",
+            "acme/release-workflows", ".github/workflows/release.yml", "a" * 40,
+            "2026-09-30T00:00:01Z",
         ),
     )
     con.execute(
         "INSERT INTO active_release_policies VALUES(?,?,?,?)",
-        (42, 99, p_hash, "2026-09-29T22:00:01Z"),
+        (42, 99, p_hash, "2026-09-30T00:00:02Z"),
     )
     con.execute(
         """INSERT INTO trusted_source_events(
            delivery_id,installation_id,repository_id,repository,source_ref,source_commit_sha,observed_at
            ) VALUES(?,?,?,?,?,?,?)""",
+        ("delivery-1", 42, 99, "acme/widget", "refs/tags/v1.2.3", "b" * 40, "2026-09-30T00:00:03Z"),
+    )
+
+    # Immutable evaluation identity vector and FK-scoped freeze.
+    ev = json.loads((ROOT / "fixtures/adversarial/evaluation-context.json").read_text())
+    assert evaluation_id(ev) == ev["evaluation_id"]
+    con.execute(
+        """INSERT INTO evaluation_contexts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
-            "delivery-1",
-            push_fixture["installation"]["id"],
-            push_fixture["repository"]["id"],
-            push_fixture["repository"]["full_name"],
-            push_fixture["ref"],
-            push_fixture["after"],
-            "2026-09-29T22:00:02Z",
+            ev["evaluation_id"], 42, 99, "acme/widget", "delivery-1", "refs/tags/v1.2.3",
+            "b" * 40, p_hash, "c" * 64, "d" * 64, "e" * 64, "2026-09-30T00:00:04Z",
         ),
     )
-    row = con.execute(
-        """SELECT p.ref_rule,p.ref_value,p.signer_repository,p.signer_workflow_path,p.signer_revision_sha,
-                  s.repository,s.source_ref,s.source_commit_sha
-           FROM active_release_policies a
-           JOIN release_policy_versions p ON p.policy_sha256=a.policy_sha256
-           JOIN trusted_source_events s ON s.installation_id=a.installation_id
-             AND s.repository_id=a.repository_id
-           WHERE a.installation_id=42 AND a.repository_id=99
-             AND s.source_commit_sha=? AND s.source_ref=?""",
-        (push_fixture["after"], push_fixture["ref"]),
-    ).fetchone()
-    assert row is not None
-    ref_rule, ref_value, signer_repo, workflow_path, signer_sha, source_repo, source_ref, source_sha = row
-    assert ref_rule == "prefix" and source_ref.startswith(ref_value)
-    assert source_repo == "acme/widget"
-    assert source_sha == "b" * 40
-    assert signer_repo == "acme/release-workflows"
-    assert workflow_path == ".github/workflows/release.yml"
-    assert signer_sha == "a" * 40
-
-    # DB-level policy scoping must reject cross-repository activation.
     try:
         con.execute(
-            "INSERT INTO active_release_policies VALUES(?,?,?,?)",
-            (42, 100, p_hash, "2026-09-29T22:00:03Z"),
+            """INSERT INTO evaluation_contexts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "rge_bad_scope", 42, 100, "acme/other", "delivery-1", "refs/tags/v1.2.3",
+                "b" * 40, p_hash, "c" * 64, "d" * 64, "e" * 64, "2026-09-30T00:00:05Z",
+            ),
         )
     except sqlite3.IntegrityError:
         pass
     else:
-        raise AssertionError("cross-repository policy activation was accepted")
+        raise AssertionError("evaluation context accepted cross-repository evidence")
 
-    print("STATIC_GATE_PASS")
+    # Delivery lease/reclaim law at the persistence boundary.
+    lease = json.loads((ROOT / "fixtures/adversarial/webhook-lease.json").read_text())
+    durable_payload = b'{"zen":"Keep it logically awesome."}'
+    durable_hash = hashlib.sha256(durable_payload).hexdigest()
+    durable_signature = "sha256=" + hmac.new(secret, durable_payload, hashlib.sha256).hexdigest()
+    con.execute(
+        """INSERT INTO webhook_deliveries(
+           source,delivery_id,event_type,payload_sha256,received_at,payload_bytes,signature_header,state,attempt_count
+           ) VALUES(?,?,?,?,?,?,?,'received',0)""",
+        (lease["source"], lease["delivery_id"], lease["event_type"], durable_hash,
+         "2026-09-30T00:00:06Z", durable_payload, durable_signature),
+    )
+    stored = con.execute(
+        "SELECT payload_sha256,payload_bytes,signature_header FROM webhook_deliveries WHERE delivery_id=?",
+        (lease["delivery_id"],),
+    ).fetchone()
+    assert hashlib.sha256(stored[1]).hexdigest() == stored[0]
+    assert hmac.compare_digest(
+        stored[2], "sha256=" + hmac.new(secret, stored[1], hashlib.sha256).hexdigest()
+    )
+    first_token = "lease-token-1"
+    changed = con.execute(
+        """UPDATE webhook_deliveries SET state='leased',lease_token=?,lease_expires_unix=?,attempt_count=attempt_count+1
+           WHERE source=? AND delivery_id=? AND state='received'""",
+        (first_token, lease["first_lease_unix"] + lease["lease_seconds"], lease["source"], lease["delivery_id"]),
+    ).rowcount
+    assert changed == 1
+    assert con.execute("SELECT attempt_count FROM webhook_deliveries WHERE delivery_id=?", (lease["delivery_id"],)).fetchone()[0] == 1
+
+    # Before expiry: second worker cannot steal the lease.
+    changed = con.execute(
+        """UPDATE webhook_deliveries SET lease_token='stolen',attempt_count=attempt_count+1
+           WHERE source=? AND delivery_id=? AND state='leased' AND lease_expires_unix <= ?""",
+        (lease["source"], lease["delivery_id"], lease["first_lease_unix"] + 60),
+    ).rowcount
+    assert changed == 0
+
+    # After expiry: exactly one reclaim is allowed and attempt counter advances.
+    changed = con.execute(
+        """UPDATE webhook_deliveries SET lease_token='lease-token-2',lease_expires_unix=?,attempt_count=attempt_count+1
+           WHERE source=? AND delivery_id=? AND state='leased' AND lease_expires_unix <= ?""",
+        (lease["reclaim_unix"] + lease["lease_seconds"], lease["source"], lease["delivery_id"], lease["reclaim_unix"]),
+    ).rowcount
+    assert changed == 1
+    assert con.execute("SELECT attempt_count FROM webhook_deliveries WHERE delivery_id=?", (lease["delivery_id"],)).fetchone()[0] == 2
+
+    # Retry backoff cannot be bypassed by immediate redelivery.
+    con.execute(
+        """UPDATE webhook_deliveries SET state='received',lease_token=NULL,lease_expires_unix=NULL,next_attempt_unix=?
+           WHERE source=? AND delivery_id=?""",
+        (lease["reclaim_unix"] + 300, lease["source"], lease["delivery_id"]),
+    )
+    changed = con.execute(
+        """UPDATE webhook_deliveries SET state='leased',lease_token='too-early'
+           WHERE source=? AND delivery_id=? AND attempt_count < 12
+             AND state='received' AND next_attempt_unix <= ?""",
+        (lease["source"], lease["delivery_id"], lease["reclaim_unix"] + 1),
+    ).rowcount
+    assert changed == 0
+
+    # Exhausted retry budget becomes terminal rather than looping forever.
+    con.execute(
+        """UPDATE webhook_deliveries SET state='received',attempt_count=12,next_attempt_unix=?
+           WHERE source=? AND delivery_id=?""",
+        (lease["reclaim_unix"], lease["source"], lease["delivery_id"]),
+    )
+    changed = con.execute(
+        """UPDATE webhook_deliveries
+           SET state='rejected',last_error_code='retry_budget_exhausted',completed_at=?
+           WHERE source=? AND delivery_id=? AND attempt_count >= 12
+             AND state='received' AND next_attempt_unix <= ?""",
+        ("2026-09-30T00:00:07Z", lease["source"], lease["delivery_id"], lease["reclaim_unix"]),
+    ).rowcount
+    assert changed == 1
+    terminal = con.execute(
+        "SELECT state,last_error_code FROM webhook_deliveries WHERE delivery_id=?",
+        (lease["delivery_id"],),
+    ).fetchone()
+    assert terminal == ("rejected", "retry_budget_exhausted")
+
+    # Reset to an owned lease to verify terminal applied semantics separately.
+    con.execute(
+        """UPDATE webhook_deliveries SET state='leased',attempt_count=2,lease_token='lease-token-2',
+           lease_expires_unix=?,next_attempt_unix=0,last_error_code=NULL,completed_at=NULL
+           WHERE source=? AND delivery_id=?""",
+        (lease["reclaim_unix"] + lease["lease_seconds"], lease["source"], lease["delivery_id"]),
+    )
+
+    # Applied deliveries are terminal and no longer reclaimable.
+    con.execute(
+        """UPDATE webhook_deliveries SET state='applied',lease_token=NULL,lease_expires_unix=NULL,completed_at=?
+           WHERE source=? AND delivery_id=? AND lease_token='lease-token-2'""",
+        ("2026-09-30T00:00:07Z", lease["source"], lease["delivery_id"]),
+    )
+    assert con.execute(
+        "UPDATE webhook_deliveries SET state='leased' WHERE source=? AND delivery_id=? AND state='received'",
+        (lease["source"], lease["delivery_id"]),
+    ).rowcount == 0
+
+    # Source scan for banned unfinished paths / old authority model.
+    source_text = "\n".join(path.read_text() for path in sorted((ROOT / "src").glob("*.rs")))
+    banned = [
+        "RELEASEGATE_INGEST_TOKEN",
+        "authorize_ingest",
+        "claim_delivery(",
+        ".tlogs.first()",
+        "todo!",
+        "unimplemented!",
+        "replace-with-high-entropy",
+    ]
+    for token in banned:
+        assert token not in source_text, token
+    assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    assert "lease_delivery(" in source_text
+    assert "durable_authentication_failed" in source_text
+    assert "retry_budget_exhausted" in source_text
+    assert "signature_header" in source_text
+    assert "freeze_evaluation_context(" in source_text
+    assert "PolicyAuthorization" in source_text and "EvidenceTruth" in source_text
+
+    print("BEDROCK_STATIC_GATE_PASS")
 
 
 if __name__ == "__main__":

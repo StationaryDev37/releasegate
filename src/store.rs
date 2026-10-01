@@ -1,11 +1,16 @@
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::{error::AppError, model::Receipt};
+use crate::error::AppError;
+
+const MAX_DELIVERY_ATTEMPTS: i64 = 12;
 
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
-    let pool = SqlitePoolOptions::new().max_connections(8).connect(database_url).await?;
+    let pool = SqlitePoolOptions::new()
+        .max_connections(8)
+        .connect(database_url)
+        .await?;
     sqlx::migrate!().run(&pool).await?;
     Ok(pool)
 }
@@ -24,29 +29,49 @@ pub enum DeliveryLease {
     InFlight,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct AuthenticatedDelivery<'a> {
+    pub source: &'a str,
+    pub delivery_id: &'a str,
+    pub event_type: &'a str,
+    pub payload_sha256: &'a str,
+    pub payload_bytes: &'a [u8],
+    pub signature_header: &'a str,
+}
+
 pub async fn lease_delivery(
     pool: &SqlitePool,
-    source: &str,
-    delivery_id: &str,
-    event_type: &str,
-    payload_sha256: &str,
+    delivery: AuthenticatedDelivery<'_>,
     lease_seconds: i64,
 ) -> Result<DeliveryLease, AppError> {
+    let AuthenticatedDelivery {
+        source,
+        delivery_id,
+        event_type,
+        payload_sha256,
+        payload_bytes,
+        signature_header,
+    } = delivery;
     if lease_seconds < 5 {
-        return Err(AppError::Internal("delivery lease duration is below safety floor"));
+        return Err(AppError::Internal(
+            "delivery lease duration is below safety floor",
+        ));
     }
     let now = OffsetDateTime::now_utc().unix_timestamp();
     let received_at = now_rfc3339()?;
     sqlx::query(
         r#"INSERT OR IGNORE INTO webhook_deliveries(
-            source,delivery_id,event_type,payload_sha256,received_at,state,attempt_count
-        ) VALUES(?,?,?,?,?,'received',0)"#,
+            source,delivery_id,event_type,payload_sha256,received_at,payload_bytes,
+            signature_header,state,attempt_count
+        ) VALUES(?,?,?,?,?,?,?,'received',0)"#,
     )
     .bind(source)
     .bind(delivery_id)
     .bind(event_type)
     .bind(payload_sha256)
     .bind(received_at)
+    .bind(payload_bytes)
+    .bind(signature_header)
     .execute(pool)
     .await?;
 
@@ -63,19 +88,37 @@ pub async fn lease_delivery(
         ));
     }
 
+    // If an unfinished delivery is legitimately redelivered after webhook
+    // secret rotation, retain the newest signature that already passed the
+    // current ingress HMAC check. Terminal rows remain immutable.
+    sqlx::query(
+        r#"UPDATE webhook_deliveries SET signature_header=?
+           WHERE source=? AND delivery_id=? AND state IN ('received','leased')"#,
+    )
+    .bind(signature_header)
+    .bind(source)
+    .bind(delivery_id)
+    .execute(pool)
+    .await?;
+
+    terminalize_exhausted_delivery(pool, source, delivery_id, now).await?;
+
     let token = Uuid::new_v4().simple().to_string();
     let expires = now.saturating_add(lease_seconds);
     let update = sqlx::query(
         r#"UPDATE webhook_deliveries
            SET state='leased',lease_token=?,lease_expires_unix=?,attempt_count=attempt_count+1,
-               last_error_code=NULL,completed_at=NULL
-           WHERE source=? AND delivery_id=?
-             AND (state='received' OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))"#,
+               next_attempt_unix=0,last_error_code=NULL,completed_at=NULL
+           WHERE source=? AND delivery_id=? AND attempt_count < ?
+             AND ((state='received' AND next_attempt_unix <= ?)
+               OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))"#,
     )
     .bind(&token)
     .bind(expires)
     .bind(source)
     .bind(delivery_id)
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(now)
     .bind(now)
     .execute(pool)
     .await?;
@@ -139,11 +182,29 @@ pub async fn release_delivery(
     lease_token: &str,
     error_code: &str,
 ) -> Result<(), AppError> {
+    let attempt: i64 = sqlx::query_scalar(
+        "SELECT attempt_count FROM webhook_deliveries WHERE source=? AND delivery_id=? AND state='leased' AND lease_token=?",
+    )
+    .bind(source)
+    .bind(delivery_id)
+    .bind(lease_token)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::Conflict("delivery lease ownership was lost".into()))?;
+    let exponent = u32::try_from(attempt.saturating_sub(1).clamp(0, 6)).unwrap_or(6);
+    let delay = 5_i64
+        .saturating_mul(2_i64.saturating_pow(exponent))
+        .min(300);
+    let next_attempt = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .saturating_add(delay);
     let result = sqlx::query(
         r#"UPDATE webhook_deliveries
-           SET state='received',lease_token=NULL,lease_expires_unix=NULL,last_error_code=?
+           SET state='received',lease_token=NULL,lease_expires_unix=NULL,
+               next_attempt_unix=?,last_error_code=?
            WHERE source=? AND delivery_id=? AND state='leased' AND lease_token=?"#,
     )
+    .bind(next_attempt)
     .bind(error_code)
     .bind(source)
     .bind(delivery_id)
@@ -153,6 +214,134 @@ pub async fn release_delivery(
     if result.rows_affected() != 1 {
         return Err(AppError::Conflict("delivery lease ownership was lost".into()));
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct RecoveredDelivery {
+    pub source: String,
+    pub delivery_id: String,
+    pub event_type: String,
+    pub payload_sha256: String,
+    pub payload_bytes: Vec<u8>,
+    pub signature_header: String,
+    pub lease_token: String,
+    pub attempt: i64,
+}
+
+pub async fn lease_recoverable_deliveries(
+    pool: &SqlitePool,
+    lease_seconds: i64,
+    limit: i64,
+) -> Result<Vec<RecoveredDelivery>, AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    terminalize_exhausted_deliveries(pool, now).await?;
+    let candidates: Vec<(String, String)> = sqlx::query_as(
+        r#"SELECT source,delivery_id FROM webhook_deliveries
+           WHERE payload_bytes IS NOT NULL AND signature_header IS NOT NULL
+             AND attempt_count < ?
+             AND ((state='received' AND next_attempt_unix <= ?)
+               OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))
+           ORDER BY received_at ASC LIMIT ?"#,
+    )
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(now)
+    .bind(now)
+    .bind(limit.clamp(1, 100))
+    .fetch_all(pool)
+    .await?;
+
+    let mut recovered = Vec::with_capacity(candidates.len());
+    for (source, delivery_id) in candidates {
+        let token = Uuid::new_v4().simple().to_string();
+        let expires = now.saturating_add(lease_seconds);
+        let changed = sqlx::query(
+            r#"UPDATE webhook_deliveries
+               SET state='leased',lease_token=?,lease_expires_unix=?,attempt_count=attempt_count+1,
+                   next_attempt_unix=0,last_error_code=NULL
+               WHERE source=? AND delivery_id=? AND attempt_count < ?
+                 AND ((state='received' AND next_attempt_unix <= ?)
+                   OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))"#,
+        )
+        .bind(&token)
+        .bind(expires)
+        .bind(&source)
+        .bind(&delivery_id)
+        .bind(MAX_DELIVERY_ATTEMPTS)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        if changed.rows_affected() != 1 {
+            continue;
+        }
+        let row: (String, String, Vec<u8>, String, i64) = sqlx::query_as(
+            r#"SELECT event_type,payload_sha256,payload_bytes,signature_header,attempt_count
+               FROM webhook_deliveries
+               WHERE source=? AND delivery_id=? AND lease_token=?"#,
+        )
+        .bind(&source)
+        .bind(&delivery_id)
+        .bind(&token)
+        .fetch_one(pool)
+        .await?;
+        recovered.push(RecoveredDelivery {
+            source,
+            delivery_id,
+            event_type: row.0,
+            payload_sha256: row.1,
+            payload_bytes: row.2,
+            signature_header: row.3,
+            lease_token: token,
+            attempt: row.4,
+        });
+    }
+    Ok(recovered)
+}
+
+async fn terminalize_exhausted_delivery(
+    pool: &SqlitePool,
+    source: &str,
+    delivery_id: &str,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"UPDATE webhook_deliveries
+           SET state='rejected',lease_token=NULL,lease_expires_unix=NULL,
+               last_error_code='retry_budget_exhausted',completed_at=?
+           WHERE source=? AND delivery_id=? AND attempt_count >= ?
+             AND ((state='received' AND next_attempt_unix <= ?)
+               OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))"#,
+    )
+    .bind(now_rfc3339()?)
+    .bind(source)
+    .bind(delivery_id)
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn terminalize_exhausted_deliveries(
+    pool: &SqlitePool,
+    now: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"UPDATE webhook_deliveries
+           SET state='rejected',lease_token=NULL,lease_expires_unix=NULL,
+               last_error_code='retry_budget_exhausted',completed_at=?
+           WHERE attempt_count >= ?
+             AND ((state='received' AND next_attempt_unix <= ?)
+               OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?))"#,
+    )
+    .bind(now_rfc3339()?)
+    .bind(MAX_DELIVERY_ATTEMPTS)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -192,14 +381,47 @@ pub async fn upsert_installation(pool: &SqlitePool, installation_id: i64, accoun
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn upsert_subscription(pool: &SqlitePool, account_id: i64, login: &str, plan_id: Option<i64>, plan_name: Option<&str>, billing_cycle: Option<&str>, unit_count: Option<i64>, status: &str, effective_at: Option<&str>) -> Result<(), AppError> {
-    sqlx::query(r#"INSERT INTO subscriptions(github_account_id,account_login,plan_id,plan_name,billing_cycle,unit_count,status,effective_at,updated_at)
-        VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(github_account_id) DO UPDATE SET account_login=excluded.account_login,
-        plan_id=excluded.plan_id, plan_name=excluded.plan_name, billing_cycle=excluded.billing_cycle,
-        unit_count=excluded.unit_count, status=excluded.status, effective_at=excluded.effective_at, updated_at=excluded.updated_at"#)
-        .bind(account_id).bind(login).bind(plan_id).bind(plan_name).bind(billing_cycle).bind(unit_count).bind(status).bind(effective_at).bind(now_rfc3339()?)
-        .execute(pool).await?;
+#[derive(Debug, Clone)]
+pub struct SubscriptionProjection {
+    pub account_id: i64,
+    pub login: String,
+    pub plan_id: Option<i64>,
+    pub plan_name: Option<String>,
+    pub billing_cycle: Option<String>,
+    pub unit_count: Option<i64>,
+    pub status: String,
+    pub effective_at: Option<String>,
+}
+
+pub async fn upsert_subscription(
+    pool: &SqlitePool,
+    projection: &SubscriptionProjection,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO subscriptions(
+            github_account_id,account_login,plan_id,plan_name,billing_cycle,unit_count,status,effective_at,updated_at
+        ) VALUES(?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(github_account_id) DO UPDATE SET
+            account_login=excluded.account_login,
+            plan_id=excluded.plan_id,
+            plan_name=excluded.plan_name,
+            billing_cycle=excluded.billing_cycle,
+            unit_count=excluded.unit_count,
+            status=excluded.status,
+            effective_at=excluded.effective_at,
+            updated_at=excluded.updated_at"#,
+    )
+    .bind(projection.account_id)
+    .bind(&projection.login)
+    .bind(projection.plan_id)
+    .bind(&projection.plan_name)
+    .bind(&projection.billing_cycle)
+    .bind(projection.unit_count)
+    .bind(&projection.status)
+    .bind(&projection.effective_at)
+    .bind(now_rfc3339()?)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -223,57 +445,24 @@ pub async fn installation_active(pool: &SqlitePool, installation_id: i64) -> Res
     Ok(active.is_some())
 }
 
-pub async fn store_receipt(pool: &SqlitePool, r: &Receipt) -> Result<Receipt, AppError> {
-    sqlx::query(r#"INSERT OR IGNORE INTO verification_receipts(receipt_id,installation_id,request_id,repository,source_commit,
-        artifact_sha256,manifest_sha256,policy_sha256,evidence_commitment,outcome,reason_code,receipt_sha256,created_at)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"#)
-        .bind(&r.receipt_id).bind(r.installation_id).bind(&r.request_id).bind(&r.repository).bind(&r.source_commit)
-        .bind(&r.artifact_sha256).bind(&r.manifest_sha256).bind(&r.policy_sha256).bind(&r.evidence_commitment)
-        .bind(&r.outcome).bind(&r.reason_code).bind(&r.receipt_sha256).bind(&r.created_at)
-        .execute(pool).await?;
-
-    let stored = sqlx::query_as::<_, Receipt>(
-        "SELECT * FROM verification_receipts WHERE installation_id=? AND request_id=?",
-    )
-    .bind(r.installation_id)
-    .bind(&r.request_id)
-    .fetch_one(pool)
-    .await?;
-
-    if stored.evidence_commitment != r.evidence_commitment {
-        return Err(AppError::Conflict(
-            "request_id was already used with different evidence".into(),
-        ));
-    }
-    Ok(stored)
+#[derive(Debug, Clone, Copy)]
+pub struct AttestationEvidenceRecord<'a> {
+    pub installation_id: i64,
+    pub repository_id: i64,
+    pub repository: &'a str,
+    pub artifact_sha256: &'a str,
+    pub initiator: &'a str,
+    pub source_url_sha256: &'a str,
+    pub transport_encoding: &'a str,
+    pub wire_sha256: &'a str,
+    pub wire_bytes: &'a [u8],
+    pub bundle_sha256: &'a str,
+    pub raw_json: &'a [u8],
 }
 
-pub async fn get_receipt(pool: &SqlitePool, receipt_id: &str) -> Result<Option<Receipt>, AppError> {
-    Ok(sqlx::query_as::<_, Receipt>("SELECT * FROM verification_receipts WHERE receipt_id=?")
-        .bind(receipt_id).fetch_optional(pool).await?)
-}
-
-pub async fn record_usage(pool: &SqlitePool, installation_id: i64, metric: &str, source_key: &str, repository: Option<&str>) -> Result<(), AppError> {
-    sqlx::query("INSERT OR IGNORE INTO usage_events(installation_id,metric,quantity,source_key,repository,occurred_at) VALUES(?,?,?,?,?,?)")
-        .bind(installation_id).bind(metric).bind(1_i64).bind(source_key).bind(repository).bind(now_rfc3339()?)
-        .execute(pool).await?;
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
 pub async fn store_attestation_bundle(
     pool: &SqlitePool,
-    installation_id: i64,
-    repository_id: i64,
-    repository: &str,
-    artifact_sha256: &str,
-    initiator: &str,
-    source_url_sha256: &str,
-    transport_encoding: &str,
-    wire_sha256: &str,
-    wire_bytes: &[u8],
-    bundle_sha256: &str,
-    raw_json: &[u8],
+    record: AttestationEvidenceRecord<'_>,
 ) -> Result<(), AppError> {
     sqlx::query(
         r#"INSERT OR IGNORE INTO attestation_bundles(
@@ -282,18 +471,18 @@ pub async fn store_attestation_bundle(
             wire_sha256,wire_bytes
         ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"#,
     )
-    .bind(bundle_sha256)
-    .bind(installation_id)
-    .bind(repository_id)
-    .bind(repository)
-    .bind(artifact_sha256.to_ascii_lowercase())
-    .bind(source_url_sha256)
-    .bind(raw_json)
+    .bind(record.bundle_sha256)
+    .bind(record.installation_id)
+    .bind(record.repository_id)
+    .bind(record.repository)
+    .bind(record.artifact_sha256.to_ascii_lowercase())
+    .bind(record.source_url_sha256)
+    .bind(record.raw_json)
     .bind(now_rfc3339()?)
-    .bind(initiator)
-    .bind(transport_encoding)
-    .bind(wire_sha256)
-    .bind(wire_bytes)
+    .bind(record.initiator)
+    .bind(record.transport_encoding)
+    .bind(record.wire_sha256)
+    .bind(record.wire_bytes)
     .execute(pool)
     .await?;
     Ok(())
@@ -521,4 +710,56 @@ fn policy_from_row(row: ReleasePolicyRow) -> Result<crate::policy::ReleasePolicy
         ));
     }
     Ok(policy)
+}
+
+pub async fn freeze_evaluation_context(
+    pool: &SqlitePool,
+    context: &crate::evaluation::EvaluationContext,
+) -> Result<crate::evaluation::EvaluationContext, AppError> {
+    sqlx::query(
+        r#"INSERT OR IGNORE INTO evaluation_contexts(
+            evaluation_id,installation_id,repository_id,repository,source_delivery_id,
+            source_ref,source_commit_sha,policy_sha256,artifact_sha256,trust_snapshot_sha256,
+            verifier_build_sha256,created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"#,
+    )
+    .bind(&context.evaluation_id)
+    .bind(context.installation_id)
+    .bind(context.repository_id)
+    .bind(&context.repository)
+    .bind(&context.source_delivery_id)
+    .bind(&context.source_ref)
+    .bind(&context.source_commit_sha)
+    .bind(&context.policy_sha256)
+    .bind(&context.artifact_sha256)
+    .bind(&context.trust_snapshot_sha256)
+    .bind(&context.verifier_build_sha256)
+    .bind(&context.created_at)
+    .execute(pool)
+    .await?;
+
+    let stored = get_evaluation_context(pool, &context.evaluation_id)
+        .await?
+        .ok_or_else(|| AppError::Conflict("evaluation context disappeared after insert".into()))?;
+    if &stored != context {
+        return Err(AppError::Conflict(
+            "evaluation identity was already bound to different frozen facts".into(),
+        ));
+    }
+    Ok(stored)
+}
+
+pub async fn get_evaluation_context(
+    pool: &SqlitePool,
+    evaluation_id: &str,
+) -> Result<Option<crate::evaluation::EvaluationContext>, AppError> {
+    Ok(sqlx::query_as::<_, crate::evaluation::EvaluationContext>(
+        r#"SELECT evaluation_id,installation_id,repository_id,repository,source_delivery_id,
+           source_ref,source_commit_sha,policy_sha256,artifact_sha256,trust_snapshot_sha256,
+           verifier_build_sha256,created_at
+           FROM evaluation_contexts WHERE evaluation_id=? LIMIT 1"#,
+    )
+    .bind(evaluation_id)
+    .fetch_optional(pool)
+    .await?)
 }

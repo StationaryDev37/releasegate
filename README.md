@@ -1,84 +1,34 @@
-# ReleaseGate
+# ReleaseGate — bedrock hardening
 
-ReleaseGate is a fail-closed verification and entitlement service designed to sit inside GitHub release workflows.
+ReleaseGate is a fail-closed release-decision kernel for GitHub artifacts. Its job is narrow: bind authenticated source facts to immutable policy, retrieve supported GitHub provenance, establish cryptographic truth, and compose that truth with authorization without conflating the two.
 
-**Commercial loop:** INSTALL → ENTITLE → VERIFY → RECEIPT → METER → REPEAT.
+## Bedrock invariants
 
-## Implemented slices
+1. **Truth is not authorization.** `EvidenceTruth`, `PolicyAuthorization`, and `ReleaseDecision` are separate state machines. Only `VERIFIED + ALLOW` can produce `RELEASE`.
+2. **Webhook evidence is durable before side effects.** After HMAC authentication, the exact payload, digest, event identity, and validated signature header are persisted in a recoverable inbox. Recovery re-hashes and re-verifies HMAC before dispatch; expired leases are reclaimed internally, retryable failures use bounded exponential backoff, and the retry budget is finite.
+3. **Replay is identity-bound.** `(ingress source, delivery id)` may never be rebound to different authenticated bytes or a different event type.
+4. **Policy is immutable.** Policy content is deterministically hashed; activation changes only a pointer.
+5. **Evaluation facts freeze.** Source delivery, repository/ref/commit, policy hash, artifact digest, trust snapshot, and executing binary hash are committed into a deterministic evaluation identity before provenance execution.
+6. **Trust is selected by identity, never list position.** The supported Rekor v1 log is matched by the exact SHA-256 identity shared by its `logId` and SPKI.
+7. **Bundle egress is pinned.** Bundle URLs must use the configured exact hostname, HTTPS, no credentials, no redirect, and a DNS result containing only public addresses; the validated address is pinned into the request client.
+8. **Authority is split.** Webhook secrets, control authority, evaluator authority, and auditor authority are distinct secrets with redacted debug behavior.
+9. **No optimistic release.** Missing/unsupported/uncertain evidence is `INDETERMINATE`; it cannot release.
 
-### v0.1 — ingress / entitlement / receipt / meter
+## Runtime surface
 
-- GitHub App and Marketplace webhook HMAC verification.
-- installation + subscription persistence.
-- deterministic evidence/receipt commitments.
-- idempotent usage ledger.
-- SQLite WAL persistence.
+- `POST /webhooks/github/app` — authenticated installation/push ingress.
+- `POST /webhooks/github/marketplace` — separately authenticated subscription ingress.
+- `POST /v1/policies/active` — control authority; stores and activates immutable policy.
+- `POST /v1/evaluations` — evaluator authority; freezes context, retrieves supported provenance, verifies it, and composes the release decision.
+- `GET /v1/evaluations/:id` — auditor authority; reads frozen evaluation facts.
+- `GET /healthz`, `GET /readyz` — process/database liveness only.
 
-### v0.2 — provenance gate
+No dashboard, generic CRUD surface, placeholder verification endpoint, or example secret file is shipped.
 
-- GitHub App RS256 JWT minting.
-- repository-scoped installation-token exchange/cache.
-- bounded artifact-attestation retrieval with raw transport evidence.
-- fail-closed supported GitHub/Sigstore provenance verification.
+## Verification gates
 
-### v0.3 — policy gate
+`scripts/static_gate.py` is an independent non-Rust gate for migrations, canonical vectors, state laws, replay/recovery semantics, trust identity, and source invariants.
 
-- immutable, content-addressed release-policy versions.
-- active policy pointer per installation/repository.
-- authenticated GitHub push source ledger.
-- exact `(installation, repo, commit, ref)` source resolution.
-- deterministic policy -> `ProvenanceExpectation` generation.
+`scripts/rust_gate.sh` is the executable Rust release gate. It refuses to claim PASS without Rust/Cargo/rustfmt/Clippy and a reviewed `Cargo.lock`.
 
-## Current security boundary
-
-`VERIFIED` is reserved for evidence that completes the supported cryptographic provenance chain under an exact trusted identity expectation. v0.3 does not let a verification request invent repository/ref/commit or signer policy: source facts come from HMAC-authenticated GitHub push deliveries and signer requirements come from immutable organization policy. Unsupported or incomplete trust remains fail-closed.
-
-## Build
-
-```bash
-cp .env.example .env
-# export variables from .env using your preferred secret manager
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets
-cargo run --release
-```
-
-## GitHub App webhook
-
-Point the GitHub App webhook URL at:
-
-`https://YOUR_HOST/webhooks/github/app`
-
-Use `application/json`, configure a high-entropy App webhook secret, and subscribe to `installation` and `push`. Configure the Marketplace listing webhook separately at `https://YOUR_HOST/webhooks/github/marketplace` with its own high-entropy secret for `marketplace_purchase` events.
-
-GitHub sends webhook signatures in `X-Hub-Signature-256`; ReleaseGate rejects deliveries that do not authenticate.
-
-## Evidence request
-
-```bash
-curl -fsS http://127.0.0.1:8080/v1/verify \
-  -H 'content-type: application/json' \
-  -H "x-releasegate-token: $RELEASEGATE_INGEST_TOKEN" \
-  -d '{
-    "request_id": "build-20260929-0001",
-    "installation_id": 12345,
-    "repository": "acme/widget",
-    "source_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-    "artifact_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-    "manifest_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-    "policy_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
-  }'
-```
-
-An active installation + active Marketplace subscription must already exist, otherwise verification fails closed.
-
-## Revenue model
-
-GitHub Marketplace can supply free, flat-rate, and per-unit plans. ReleaseGate stores plan state from Marketplace events and uses the usage ledger for internal quota enforcement/analytics. Payment-card handling stays outside ReleaseGate. Paid Marketplace plans require an eligible verified publisher organization and financial onboarding, so live paid billing remains an external release gate.
-
-## Current closure status
-
-See `STATUS.md` for the evidence table. Rust format/compile/Clippy/tests remain **UNEXECUTED** in the authoring runtime because no Rust toolchain is installed. Live GitHub integration remains blocked on real App credentials, installation, deployed HTTPS ingress, and a real attested artifact.
-
-See `docs/ARCHITECTURE.md`, `docs/V0_3_POLICY_GATE.md`, `docs/PRODUCT.md`, and `docs/NEXT_GATE.md`.
+See `STATUS.md` for executed evidence. Configuration is defined in `CONFIGURATION.md`; no secret values are supplied by the repository.

@@ -1,0 +1,10 @@
+{
+  "source": "github_app",
+  "delivery_id": "lease-vector-001",
+  "event_type": "push",
+  "payload_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "conflicting_payload_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "first_lease_unix": 2000000000,
+  "lease_seconds": 120,
+  "reclaim_unix": 2000000121
+}

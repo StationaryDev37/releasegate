@@ -1,8 +1,0 @@
-ReleaseGate v0.1 static gate
-STATUS=PASS
-SOURCE_ARCHIVE_SHA256=bf23924a358ace274a0e4bdc79e18d4d41608b850f5b2a2a187e70c09d5680a0
-TOTAL_SOURCE_FILES=26
-RUST_SOURCE_FILES=9
-RUST_SOURCE_LINES=707
-CHECKS=toml_parse,json_fixtures,sqlite_migration,hmac_sha256_vector,deterministic_receipt_vector
-RUST_BUILD_STATUS=UNEXECUTED_NO_CARGO
