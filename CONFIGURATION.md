@@ -12,6 +12,11 @@ Required runtime inputs:
 - `RELEASEGATE_EVALUATOR_TOKEN` — authority to freeze evaluation contexts.
 - `RELEASEGATE_AUDITOR_TOKEN` — read-only authority for frozen evaluation evidence.
 - `RELEASEGATE_GITHUB_BUNDLE_HOST` — exact DNS hostname accepted for attestation bundle egress.
+- `RELEASEGATE_SILICON_LOCK_PATH` — canonical silicon lock file generated and validated by `scripts/silicon_ctl.py`.
+- `RELEASEGATE_SILICON_LOCK_SHA256` — SHA-256 of the exact lock bytes executed under.
+- `RELEASEGATE_SILICON_FINGERPRINT` — host-topology identity committed by the lock.
+- `RELEASEGATE_RUNTIME_CPUSET` — exact CPU set applied to the ReleaseGate process.
+- `TOKIO_WORKER_THREADS` — must equal the number of locked runtime CPUs.
 
 Optional operational inputs:
 
@@ -21,3 +26,5 @@ Optional operational inputs:
 - `RELEASEGATE_LOG` — tracing filter.
 
 Every secret-bearing value is stored in a redacted `Secret` type. No configuration structure derives `Debug`.
+
+Silicon variables are normally injected only by `scripts/silicon_ctl.py exec`; hand-setting them does not configure process affinity and will fail runtime attestation if the observed CPU set differs. The silicon fingerprint is operational evidence only and never enters release/evaluation identity.

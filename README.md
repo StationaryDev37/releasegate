@@ -1,4 +1,4 @@
-# ReleaseGate — bedrock hardening
+# ReleaseGate — silicon-locked bedrock
 
 ReleaseGate is a fail-closed release-decision kernel for GitHub artifacts. Its job is narrow: bind authenticated source facts to immutable policy, retrieve supported GitHub provenance, establish cryptographic truth, and compose that truth with authorization without conflating the two.
 
@@ -12,7 +12,8 @@ ReleaseGate is a fail-closed release-decision kernel for GitHub artifacts. Its j
 6. **Trust is selected by identity, never list position.** The supported Rekor v1 log is matched by the exact SHA-256 identity shared by its `logId` and SPKI.
 7. **Bundle egress is pinned.** Bundle URLs must use the configured exact hostname, HTTPS, no credentials, no redirect, and a DNS result containing only public addresses; the validated address is pinned into the request client.
 8. **Authority is split.** Webhook secrets, control authority, evaluator authority, and auditor authority are distinct secrets with redacted debug behavior.
-9. **No optimistic release.** Missing/unsupported/uncertain evidence is `INDETERMINATE`; it cannot release.
+9. **Silicon is constrained, never trusted for truth.** A content-addressed host lock binds NIC/CPU topology to IRQ/runtime placement. Runtime startup re-attests the exact lock bytes and actual process CPU affinity. Hardware placement is operational evidence only and cannot alter evaluation identity.
+10. **No optimistic release.** Missing/unsupported/uncertain evidence is `INDETERMINATE`; it cannot release.
 
 ## Runtime surface
 
@@ -27,7 +28,7 @@ No dashboard, generic CRUD surface, placeholder verification endpoint, or exampl
 
 ## Verification gates
 
-`scripts/static_gate.py` is an independent non-Rust gate for migrations, canonical vectors, state laws, replay/recovery semantics, trust identity, and source invariants.
+`scripts/static_gate.py` is an independent non-Rust gate for migrations, canonical vectors, state laws, replay/recovery semantics, trust identity, and source invariants. `scripts/silicon_gate.py` separately proves lock generation, host validation, tamper rejection, and deterministic placement.
 
 `scripts/rust_gate.sh` is the executable Rust release gate. It refuses to claim PASS without Rust/Cargo/rustfmt/Clippy and a reviewed `Cargo.lock`.
 

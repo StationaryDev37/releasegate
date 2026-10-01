@@ -51,7 +51,6 @@ impl Config {
         let bundle_host = env::var("RELEASEGATE_GITHUB_BUNDLE_HOST")
             .context("missing required environment variable RELEASEGATE_GITHUB_BUNDLE_HOST")?;
         validate_hostname(&bundle_host)?;
-
         Ok(Self {
             bind,
             database_url,

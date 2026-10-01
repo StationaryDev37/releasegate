@@ -8,6 +8,7 @@ mod model;
 mod policy;
 mod provenance;
 mod secret;
+mod silicon;
 mod store;
 
 use std::{sync::Arc, time::Duration};
@@ -44,6 +45,7 @@ struct AppState {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let config = Arc::new(Config::from_env()?);
+    let silicon = silicon::attest_runtime()?;
     let db = store::connect(&config.database_url).await?;
     let trust_snapshot_sha256 = provenance::embedded_trust_snapshot_sha256()
         .map_err(|_| anyhow::anyhow!("embedded trust snapshot failed to parse"))?;
@@ -67,7 +69,14 @@ async fn main() -> anyhow::Result<()> {
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    tracing::info!(bind = %config.bind, "releasegate listening");
+    tracing::info!(
+        bind = %config.bind,
+        silicon_fingerprint = %silicon.host_fingerprint,
+        silicon_lock_sha256 = %silicon.lock_sha256,
+        runtime_cpus = ?silicon.runtime_cpus,
+        tokio_worker_threads = silicon.tokio_worker_threads,
+        "releasegate listening"
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown())
         .await?;

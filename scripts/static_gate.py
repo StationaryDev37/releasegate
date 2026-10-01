@@ -62,7 +62,7 @@ def compose(truth: str, authorization: str) -> str:
 
 def main() -> None:
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
-    assert cargo["package"]["version"] == "0.3.1"
+    assert cargo["package"]["version"] == "0.3.2"
     assert cargo["dependencies"]["attestation-verify"] == "=0.1.0"
     assert not (ROOT / ".env.example").exists()
 
@@ -285,6 +285,9 @@ def main() -> None:
     assert "signature_header" in source_text
     assert "freeze_evaluation_context(" in source_text
     assert "PolicyAuthorization" in source_text and "EvidenceTruth" in source_text
+    evaluation_text = (ROOT / "src/evaluation.rs").read_text()
+    assert "silicon" not in evaluation_text.lower(), "silicon must not enter evaluation identity"
+    assert (ROOT / "src/silicon.rs").exists()
 
     print("BEDROCK_STATIC_GATE_PASS")
 

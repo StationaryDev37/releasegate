@@ -1,4 +1,4 @@
-# ReleaseGate v0.3.1 bedrock-hardening status
+# ReleaseGate v0.3.2 silicon-lock status
 
 | Gate | Status | Evidence |
 |---|---|---|
@@ -12,6 +12,8 @@
 | Bundle egress hardening | IMPLEMENTED | exact hostname + public DNS validation + address pin + no redirect |
 | Authority split / secret redaction | IMPLEMENTED | webhook/control/evaluator/auditor separation; redacted secret type |
 | Critical verifier dependency pin | IMPLEMENTED | `attestation-verify = "=0.1.0"` |
+| Silicon lock / affinity attestation | IMPLEMENTED | host-specific content-addressed topology lock; deterministic housekeeping/IRQ/runtime CPU placement; startup verifies lock bytes and `/proc/self/status` affinity |
+| Silicon independent gate | PASSED | `scripts/silicon_gate.py` proves lock creation, validation, tamper rejection and affinity execution |
 | Bedrock independent static gate | PASSED | `scripts/static_gate.py` -> `BEDROCK_STATIC_GATE_PASS` |
 | SQLite migration chain 0001-0007 | PASSED | executed in-memory with foreign keys enabled by static gate |
 | Lease/recovery adversarial vectors | PASSED | independent SQLite/Python vectors prove non-steal-before-expiry, reclaim-after-expiry, backoff enforcement, retry-budget terminalization, durable payload digest/HMAC re-auth, and terminal applied state |
