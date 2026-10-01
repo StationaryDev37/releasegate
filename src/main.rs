@@ -7,6 +7,7 @@ mod github;
 mod model;
 mod policy;
 mod provenance;
+mod receipt;
 mod secret;
 mod silicon;
 mod store;
@@ -25,9 +26,10 @@ use config::Config;
 use secret::Secret;
 use error::AppError;
 use decision::{compose, EvidenceTruth};
-use model::{EvaluationFreezeResponse, EvaluationRequest, WebhookAck};
+use model::{CheckProjection, EvaluationRequest, EvaluationResultResponse, ReceiptKeyResponse, WebhookAck};
 use serde_json::Value;
 use policy::{ReleasePolicy, ReleasePolicySpec, TrustedSourceContext};
+use receipt::ReceiptSigner;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
@@ -39,6 +41,8 @@ struct AppState {
     trust_snapshot_sha256: Arc<str>,
     verifier_build_sha256: Arc<str>,
     github: github::GithubApi,
+    receipt_signer: Arc<ReceiptSigner>,
+    receipt_public_key_pem: Arc<str>,
 }
 
 #[tokio::main]
@@ -56,16 +60,25 @@ async fn main() -> anyhow::Result<()> {
         config.github_app_private_key_pem.as_bytes(),
     )?;
     let github = github::GithubApi::new(signer, config.bundle_host.clone())?;
+    let receipt_signer = Arc::new(ReceiptSigner::new(
+        config.receipt_signing_key_id.clone(),
+        config.receipt_signing_private_key_pem.as_bytes(),
+        config.receipt_signing_public_key_pem.as_bytes(),
+    )?);
     let state = AppState {
         config: config.clone(),
         db,
         trust_snapshot_sha256: Arc::from(trust_snapshot_sha256),
         verifier_build_sha256: Arc::from(verifier_build_sha256),
         github,
+        receipt_signer,
+        receipt_public_key_pem: Arc::from(config.receipt_signing_public_key_pem.clone()),
     };
 
     let recovery_state = state.clone();
     tokio::spawn(async move { recovery_loop(recovery_state).await });
+    let check_state = state.clone();
+    tokio::spawn(async move { check_dispatch_loop(check_state).await });
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -95,6 +108,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/policies/active", post(put_active_policy))
         .route("/v1/evaluations", post(freeze_evaluation))
         .route("/v1/evaluations/:id", get(get_evaluation))
+        .route("/v1/receipt-key", get(get_receipt_key))
         .layer(RequestBodyLimitLayer::new(1_048_576))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -457,7 +471,7 @@ async fn freeze_evaluation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(req): Json<EvaluationRequest>,
-) -> Result<Json<EvaluationFreezeResponse>, AppError> {
+) -> Result<Json<EvaluationResultResponse>, AppError> {
     authorize(&state.config.evaluator_token, &headers)?;
     if !store::entitlement_active(&state.db, req.installation_id).await? {
         return Err(AppError::Unauthorized);
@@ -489,10 +503,16 @@ async fn freeze_evaluation(
         &req.artifact_sha256,
         &state.trust_snapshot_sha256,
         &state.verifier_build_sha256,
+        state.receipt_signer.public_key_sha256(),
         store::now_rfc3339()?,
     )?;
     let context = store::freeze_evaluation_context(&state.db, &context).await?;
-    let (evidence_truth, provenance_reason, attestation_bundle_sha256) =
+
+    if let Some(existing) = store::get_release_evaluation(&state.db, &context.evaluation_id).await? {
+        return Ok(Json(build_evaluation_response(&state, context, existing).await?));
+    }
+
+    let (evidence_truth, provenance_reason, bundle_outcomes) =
         if authorization == decision::PolicyAuthorization::Allow {
             let expectation = policy_resolution
                 .expectation
@@ -514,12 +534,7 @@ async fn freeze_evaluation(
                         expectation,
                         &bundles,
                     );
-                    let hashes = verification
-                        .bundles
-                        .iter()
-                        .map(|bundle| bundle.bundle_sha256.clone())
-                        .collect();
-                    (verification.truth, verification.reason, hashes)
+                    (verification.truth, verification.reason, verification.bundles)
                 }
                 Err(provenance::ProvenanceGateError::Github(_)) => (
                     EvidenceTruth::Indeterminate,
@@ -536,6 +551,44 @@ async fn freeze_evaluation(
             )
         };
     let release_decision = compose(evidence_truth, authorization);
+    let receipt = state.receipt_signer.sign_decision(
+        &context,
+        evidence_truth,
+        authorization,
+        release_decision,
+        policy_resolution.reason,
+        &provenance_reason,
+        &bundle_outcomes,
+    )?;
+    let (check_name, check_conclusion, check_title, check_summary) = check_projection_text(
+        &context,
+        release_decision,
+        evidence_truth,
+        authorization,
+        policy_resolution.reason,
+        &provenance_reason,
+        &receipt.receipt_id,
+    );
+    let stored = store::finalize_release_evaluation(
+        &state.db,
+        store::ReleaseFinalization {
+            context: &context,
+            evidence_truth,
+            policy_authorization: authorization,
+            release_decision,
+            policy_reason: policy_resolution.reason,
+            provenance_reason: &provenance_reason,
+            receipt_key_id: state.receipt_signer.key_id(),
+            receipt: &receipt,
+            bundle_outcomes: &bundle_outcomes,
+            check_name: &check_name,
+            check_conclusion,
+            check_title: &check_title,
+            check_summary: &check_summary,
+        },
+    )
+    .await?;
+
     tracing::info!(
         evaluation_id = %context.evaluation_id,
         installation_id = context.installation_id,
@@ -543,29 +596,170 @@ async fn freeze_evaluation(
         ?evidence_truth,
         ?authorization,
         ?release_decision,
-        provenance_reason = %provenance_reason,
-        "release evaluation completed"
+        decision_commitment = %stored.decision_commitment,
+        receipt_id = %stored.receipt_id,
+        "release evaluation durably finalized"
     );
-    Ok(Json(EvaluationFreezeResponse {
-        context,
-        policy: policy_resolution,
-        evidence_truth,
-        release_decision,
-        provenance_reason,
-        attestation_bundle_sha256,
-    }))
+    Ok(Json(build_evaluation_response(&state, context, stored).await?))
 }
 
 async fn get_evaluation(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<Json<evaluation::EvaluationContext>, AppError> {
+) -> Result<Json<EvaluationResultResponse>, AppError> {
     authorize(&state.config.auditor_token, &headers)?;
-    store::get_evaluation_context(&state.db, &id)
+    let context = store::get_evaluation_context(&state.db, &id)
         .await?
-        .map(Json)
-        .ok_or(AppError::NotFound)
+        .ok_or(AppError::NotFound)?;
+    let result = store::get_release_evaluation(&state.db, &id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    Ok(Json(build_evaluation_response(&state, context, result).await?))
+}
+
+async fn get_receipt_key(State(state): State<AppState>) -> Json<ReceiptKeyResponse> {
+    Json(ReceiptKeyResponse {
+        algorithm: "RS256",
+        key_id: state.receipt_signer.key_id().to_owned(),
+        public_key_sha256: state.receipt_signer.public_key_sha256().to_owned(),
+        public_key_pem: state.receipt_public_key_pem.to_string(),
+    })
+}
+
+async fn build_evaluation_response(
+    state: &AppState,
+    context: evaluation::EvaluationContext,
+    result: store::ReleaseEvaluationRecord,
+) -> Result<EvaluationResultResponse, AppError> {
+    if result.evaluation_id != context.evaluation_id {
+        return Err(AppError::Conflict(
+            "release result is bound to a different frozen evaluation context".into(),
+        ));
+    }
+    let (check_state, check_run_id, last_error_code) = store::check_dispatch_state(
+        &state.db,
+        &context.evaluation_id,
+    )
+    .await?
+    .unwrap_or_else(|| ("missing".to_owned(), None, Some("check_outbox_missing".to_owned())));
+    Ok(EvaluationResultResponse {
+        context,
+        evidence_truth: result.evidence_truth,
+        policy_authorization: result.policy_authorization,
+        release_decision: result.release_decision,
+        policy_reason: result.policy_reason,
+        provenance_reason: result.provenance_reason,
+        attestation_set_sha256: result.attestation_set_sha256,
+        decision_commitment: result.decision_commitment,
+        receipt_id: result.receipt_id,
+        receipt_key_id: result.receipt_key_id,
+        receipt_key_sha256: result.receipt_key_sha256,
+        receipt_jws: result.receipt_jws,
+        receipt_sha256: result.receipt_sha256,
+        completed_at: result.completed_at,
+        github_check: CheckProjection {
+            state: check_state,
+            check_run_id,
+            last_error_code,
+        },
+    })
+}
+
+fn check_projection_text(
+    context: &evaluation::EvaluationContext,
+    release_decision: decision::ReleaseDecision,
+    evidence_truth: decision::EvidenceTruth,
+    authorization: decision::PolicyAuthorization,
+    policy_reason: &str,
+    provenance_reason: &str,
+    receipt_id: &str,
+) -> (String, &'static str, String, String) {
+    let suffix = context
+        .evaluation_id
+        .strip_prefix("rge_")
+        .unwrap_or(&context.evaluation_id);
+    let name = format!("ReleaseGate {suffix}");
+    let (conclusion, title) = match release_decision {
+        decision::ReleaseDecision::Release => ("success", "Release authorized".to_owned()),
+        decision::ReleaseDecision::Block => ("failure", "Release blocked".to_owned()),
+        decision::ReleaseDecision::Hold => ("action_required", "Release held".to_owned()),
+    };
+    let summary = format!(
+        "decision={:?}; evidence={:?}; policy={:?}; policy_reason={}; provenance_reason={}; receipt={}",
+        release_decision,
+        evidence_truth,
+        authorization,
+        policy_reason,
+        provenance_reason,
+        receipt_id,
+    );
+    (name, conclusion, title, summary)
+}
+
+async fn check_dispatch_loop(state: AppState) {
+    loop {
+        match store::lease_check_dispatches(&state.db, state.config.check_lease_seconds, 32).await {
+            Ok(leases) => {
+                for lease in leases {
+                    let result = state
+                        .github
+                        .publish_check_run(
+                            lease.installation_id,
+                            lease.repository_id,
+                            &lease.repository,
+                            &lease.head_sha,
+                            &lease.check_name,
+                            &lease.external_id,
+                            &lease.conclusion,
+                            &lease.title,
+                            &lease.summary,
+                        )
+                        .await;
+                    match result {
+                        Ok(check_run_id) => {
+                            if let Err(error) = store::complete_check_dispatch(
+                                &state.db,
+                                &lease.evaluation_id,
+                                &lease.lease_token,
+                                check_run_id,
+                            )
+                            .await
+                            {
+                                tracing::error!(%error, evaluation_id=%lease.evaluation_id, "failed to commit GitHub check delivery");
+                            }
+                        }
+                        Err(error) if error.is_retryable() => {
+                            if let Err(store_error) = store::release_check_dispatch(
+                                &state.db,
+                                &lease.evaluation_id,
+                                &lease.lease_token,
+                                error.stable_code(),
+                            )
+                            .await
+                            {
+                                tracing::error!(%store_error, evaluation_id=%lease.evaluation_id, "failed to reschedule GitHub check delivery");
+                            }
+                        }
+                        Err(error) => {
+                            if let Err(store_error) = store::dead_letter_check_dispatch(
+                                &state.db,
+                                &lease.evaluation_id,
+                                &lease.lease_token,
+                                error.stable_code(),
+                            )
+                            .await
+                            {
+                                tracing::error!(%store_error, evaluation_id=%lease.evaluation_id, "failed to dead-letter GitHub check delivery");
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) => tracing::error!(%error, "GitHub check outbox scan failed"),
+        }
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
 }
 
 fn authorize(expected: &Secret, headers: &HeaderMap) -> Result<(), AppError> {

@@ -107,12 +107,60 @@ pub enum GithubApiError {
     InvalidBundleEncoding,
     #[error("attestation bundle is not valid JSON")]
     InvalidBundleJson,
+    #[error("invalid GitHub check request")]
+    InvalidCheckRequest,
+    #[error("GitHub check response is invalid")]
+    InvalidCheckResponse,
+}
+
+impl GithubApiError {
+    #[must_use]
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Transport
+                | Self::HttpStatus(429)
+                | Self::HttpStatus(500..=599)
+        )
+    }
+
+    #[must_use]
+    pub fn stable_code(&self) -> &'static str {
+        match self {
+            Self::ClientBuild => "github_client_build",
+            Self::Jwt => "github_jwt",
+            Self::Transport => "github_transport",
+            Self::HttpStatus(401) => "github_http_401",
+            Self::HttpStatus(403) => "github_http_403",
+            Self::HttpStatus(404) => "github_http_404",
+            Self::HttpStatus(422) => "github_http_422",
+            Self::HttpStatus(429) => "github_http_429",
+            Self::HttpStatus(500..=599) => "github_http_5xx",
+            Self::HttpStatus(_) => "github_http_other",
+            Self::InvalidTokenResponse => "github_token_response",
+            Self::InvalidAttestationRequest => "github_attestation_request",
+            Self::InvalidAttestationResponse => "github_attestation_response",
+            Self::UnsafeBundleUrl => "github_bundle_url",
+            Self::BundleTooLarge => "github_bundle_too_large",
+            Self::AttestationListIncomplete => "github_attestation_pagination",
+            Self::InvalidBundleEncoding => "github_bundle_encoding",
+            Self::InvalidBundleJson => "github_bundle_json",
+            Self::InvalidCheckRequest => "github_check_request",
+            Self::InvalidCheckResponse => "github_check_response",
+        }
+    }
 }
 
 #[derive(Clone)]
 struct CachedInstallationToken {
     token: String,
     expires_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum TokenScope {
+    AttestationRead,
+    CheckWrite,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,7 +171,25 @@ struct InstallationTokenRequest {
 
 #[derive(Debug, Serialize)]
 struct InstallationPermissions {
-    attestations: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    attestations: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checks: Option<&'static str>,
+}
+
+impl TokenScope {
+    fn permissions(self) -> InstallationPermissions {
+        match self {
+            Self::AttestationRead => InstallationPermissions {
+                attestations: Some("read"),
+                checks: None,
+            },
+            Self::CheckWrite => InstallationPermissions {
+                attestations: None,
+                checks: Some("write"),
+            },
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -145,6 +211,33 @@ struct AttestationReference {
     bundle_url: String,
 }
 
+#[derive(Debug, Serialize)]
+struct CreateCheckRunRequest<'a> {
+    name: &'a str,
+    head_sha: &'a str,
+    status: &'static str,
+    conclusion: &'a str,
+    external_id: &'a str,
+    output: CheckOutput<'a>,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckOutput<'a> {
+    title: &'a str,
+    summary: &'a str,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunResponse {
+    id: i64,
+    external_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CheckRunsResponse {
+    check_runs: Vec<CheckRunResponse>,
+}
+
 #[derive(Debug, Clone)]
 pub struct RawAttestationBundle {
     pub repository_id: i64,
@@ -161,7 +254,7 @@ pub struct RawAttestationBundle {
 pub struct GithubApi {
     client: reqwest::Client,
     signer: Arc<GithubAppJwtSigner>,
-    token_cache: Arc<RwLock<HashMap<(i64, i64), CachedInstallationToken>>>,
+    token_cache: Arc<RwLock<HashMap<(i64, i64, TokenScope), CachedInstallationToken>>>,
     bundle_host: Arc<str>,
 }
 
@@ -169,7 +262,7 @@ impl GithubApi {
     pub fn new(signer: GithubAppJwtSigner, bundle_host: String) -> Result<Self, GithubApiError> {
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
-        headers.insert(USER_AGENT, HeaderValue::from_static("releasegate/0.3.1"));
+        headers.insert(USER_AGENT, HeaderValue::from_static("releasegate/0.4.0"));
         headers.insert(
             "x-github-api-version",
             HeaderValue::from_static(GITHUB_API_VERSION),
@@ -193,15 +286,16 @@ impl GithubApi {
         })
     }
 
-    pub async fn installation_token(
+    async fn installation_token(
         &self,
         installation_id: i64,
         repository_id: i64,
+        scope: TokenScope,
     ) -> Result<String, GithubApiError> {
         if installation_id <= 0 || repository_id <= 0 {
             return Err(GithubApiError::InvalidTokenResponse);
         }
-        let key = (installation_id, repository_id);
+        let key = (installation_id, repository_id, scope);
         let now = OffsetDateTime::now_utc();
         if let Some(cached) = self.token_cache.read().await.get(&key) {
             if cached.expires_at > now + time::Duration::seconds(TOKEN_REUSE_SAFETY_SECONDS) {
@@ -215,9 +309,7 @@ impl GithubApi {
         );
         let request = InstallationTokenRequest {
             repository_ids: [repository_id],
-            permissions: InstallationPermissions {
-                attestations: "read",
-            },
+            permissions: scope.permissions(),
         };
         let response = self
             .client
@@ -251,6 +343,24 @@ impl GithubApi {
         Ok(body.token)
     }
 
+    async fn attestation_token(
+        &self,
+        installation_id: i64,
+        repository_id: i64,
+    ) -> Result<String, GithubApiError> {
+        self.installation_token(installation_id, repository_id, TokenScope::AttestationRead)
+            .await
+    }
+
+    async fn check_token(
+        &self,
+        installation_id: i64,
+        repository_id: i64,
+    ) -> Result<String, GithubApiError> {
+        self.installation_token(installation_id, repository_id, TokenScope::CheckWrite)
+            .await
+    }
+
     pub async fn fetch_attestation_bundles(
         &self,
         installation_id: i64,
@@ -265,7 +375,7 @@ impl GithubApi {
             return Err(GithubApiError::InvalidAttestationRequest);
         }
         let token = self
-            .installation_token(installation_id, repository_id)
+            .attestation_token(installation_id, repository_id)
             .await?;
         let digest = format!("sha256:{}", artifact_sha256.to_ascii_lowercase());
         let url = format!(
@@ -306,7 +416,103 @@ impl GithubApi {
             }
             bundles.push(self.fetch_bundle(&item).await?);
         }
+        bundles.sort_by(|a, b| a.bundle_sha256.cmp(&b.bundle_sha256));
+        bundles.dedup_by(|a, b| a.bundle_sha256 == b.bundle_sha256);
         Ok(bundles)
+    }
+
+    pub async fn publish_check_run(
+        &self,
+        installation_id: i64,
+        repository_id: i64,
+        repository: &str,
+        head_sha: &str,
+        check_name: &str,
+        external_id: &str,
+        conclusion: &str,
+        title: &str,
+        summary: &str,
+    ) -> Result<i64, GithubApiError> {
+        let (owner, repo) = split_repository(repository)?;
+        if head_sha.len() != 40
+            || !head_sha.bytes().all(|b| b.is_ascii_hexdigit())
+            || check_name.is_empty()
+            || check_name.len() > 128
+            || external_id.is_empty()
+            || external_id.len() > 256
+            || title.is_empty()
+            || title.len() > 256
+            || summary.is_empty()
+            || summary.len() > 8_192
+            || !matches!(conclusion, "success" | "failure" | "action_required")
+        {
+            return Err(GithubApiError::InvalidCheckRequest);
+        }
+        let token = self.check_token(installation_id, repository_id).await?;
+        let list_url = format!(
+            "https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
+        );
+        let existing = self
+            .client
+            .get(&list_url)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .query(&[("check_name", check_name), ("filter", "all"), ("per_page", "100")])
+            .send()
+            .await
+            .map_err(|_| GithubApiError::Transport)?;
+        let status = existing.status();
+        if !status.is_success() {
+            return Err(GithubApiError::HttpStatus(status.as_u16()));
+        }
+        if existing
+            .headers()
+            .get(LINK)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("rel=\"next\""))
+        {
+            return Err(GithubApiError::InvalidCheckResponse);
+        }
+        let listed: CheckRunsResponse = existing
+            .json()
+            .await
+            .map_err(|_| GithubApiError::InvalidCheckResponse)?;
+        if let Some(found) = listed
+            .check_runs
+            .into_iter()
+            .find(|run| run.external_id.as_deref() == Some(external_id))
+        {
+            return Ok(found.id);
+        }
+
+        let create_url = format!("https://api.github.com/repos/{owner}/{repo}/check-runs");
+        let request = CreateCheckRunRequest {
+            name: check_name,
+            head_sha,
+            status: "completed",
+            conclusion,
+            external_id,
+            output: CheckOutput { title, summary },
+        };
+        let response = self
+            .client
+            .post(create_url)
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .json(&request)
+            .send()
+            .await
+            .map_err(|_| GithubApiError::Transport)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(GithubApiError::HttpStatus(status.as_u16()));
+        }
+        let created: CheckRunResponse = response
+            .json()
+            .await
+            .map_err(|_| GithubApiError::InvalidCheckResponse)?;
+        if created.id <= 0 || created.external_id.as_deref() != Some(external_id) {
+            return Err(GithubApiError::InvalidCheckResponse);
+        }
+        Ok(created.id)
     }
 
     async fn fetch_bundle(

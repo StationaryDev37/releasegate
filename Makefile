@@ -1,8 +1,11 @@
-.PHONY: bedrock-static silicon-gate rust-gate
+.PHONY: static commercial silicon-gate rust-gate
 
-bedrock-static:
+static:
 	python3 scripts/static_gate.py
-	python3 scripts/silicon_gate.py
+	python3 scripts/commercial_gate.py
+
+commercial:
+	python3 scripts/commercial_gate.py
 
 silicon-gate:
 	python3 scripts/silicon_gate.py

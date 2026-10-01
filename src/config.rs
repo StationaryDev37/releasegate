@@ -15,7 +15,11 @@ pub struct Config {
     pub control_token: Secret,
     pub evaluator_token: Secret,
     pub auditor_token: Secret,
+    pub receipt_signing_private_key_pem: Secret,
+    pub receipt_signing_public_key_pem: String,
+    pub receipt_signing_key_id: String,
     pub delivery_lease_seconds: i64,
+    pub check_lease_seconds: i64,
     pub bundle_host: String,
 }
 
@@ -41,12 +45,28 @@ impl Config {
         let control_token = required_secret("RELEASEGATE_CONTROL_TOKEN")?;
         let evaluator_token = required_secret("RELEASEGATE_EVALUATOR_TOKEN")?;
         let auditor_token = required_secret("RELEASEGATE_AUDITOR_TOKEN")?;
+        let receipt_signing_private_key_pem = required_secret("RELEASEGATE_RECEIPT_PRIVATE_KEY_PEM")?;
+        let receipt_signing_public_key_pem = env::var("RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM")
+            .context("missing required environment variable RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM")?;
+        if receipt_signing_public_key_pem.trim().is_empty() {
+            anyhow::bail!("RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM must not be empty");
+        }
+        let receipt_signing_key_id = env::var("RELEASEGATE_RECEIPT_KEY_ID")
+            .context("missing required environment variable RELEASEGATE_RECEIPT_KEY_ID")?;
+        validate_key_id(&receipt_signing_key_id)?;
         let delivery_lease_seconds = env::var("RELEASEGATE_DELIVERY_LEASE_SECONDS")
             .unwrap_or_else(|_| "120".to_owned())
             .parse::<i64>()
             .context("invalid RELEASEGATE_DELIVERY_LEASE_SECONDS")?;
         if !(30..=900).contains(&delivery_lease_seconds) {
             anyhow::bail!("RELEASEGATE_DELIVERY_LEASE_SECONDS must be between 30 and 900");
+        }
+        let check_lease_seconds = env::var("RELEASEGATE_CHECK_LEASE_SECONDS")
+            .unwrap_or_else(|_| "120".to_owned())
+            .parse::<i64>()
+            .context("invalid RELEASEGATE_CHECK_LEASE_SECONDS")?;
+        if !(30..=900).contains(&check_lease_seconds) {
+            anyhow::bail!("RELEASEGATE_CHECK_LEASE_SECONDS must be between 30 and 900");
         }
         let bundle_host = env::var("RELEASEGATE_GITHUB_BUNDLE_HOST")
             .context("missing required environment variable RELEASEGATE_GITHUB_BUNDLE_HOST")?;
@@ -61,7 +81,11 @@ impl Config {
             control_token,
             evaluator_token,
             auditor_token,
+            receipt_signing_private_key_pem,
+            receipt_signing_public_key_pem,
+            receipt_signing_key_id,
             delivery_lease_seconds,
+            check_lease_seconds,
             bundle_host,
         })
     }
@@ -86,6 +110,16 @@ fn validate_hostname(host: &str) -> Result<()> {
         })
     {
         anyhow::bail!("RELEASEGATE_GITHUB_BUNDLE_HOST is not a valid DNS hostname");
+    }
+    Ok(())
+}
+
+fn validate_key_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+    {
+        anyhow::bail!("RELEASEGATE_RECEIPT_KEY_ID contains unsupported characters");
     }
     Ok(())
 }

@@ -4,6 +4,7 @@ cd "$(dirname "$0")/.."
 
 pkg install -y rust clang pkg-config openssl
 python3 scripts/static_gate.py
+python3 scripts/commercial_gate.py
 
 if [[ ! -f Cargo.lock ]]; then
   cargo generate-lockfile

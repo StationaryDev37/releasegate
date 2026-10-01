@@ -1,5 +1,5 @@
 {
-  "schema": "releasegate-evaluation-v1",
+  "schema": "releasegate-evaluation-v2",
   "installation_id": 42,
   "repository_id": 99,
   "repository": "acme/widget",
@@ -10,5 +10,6 @@
   "artifact_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "trust_snapshot_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
   "verifier_build_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
-  "evaluation_id": "rge_1f6f385e648dfa4c7d2eca4478bb88e8fba7adf28686313fd751e2e8204c2183"
+  "receipt_key_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "evaluation_id": "rge_e94802aa8575d28057879ef0960592fe27a8ff66c8f1a3bd6ceda2397f90e1aa"
 }

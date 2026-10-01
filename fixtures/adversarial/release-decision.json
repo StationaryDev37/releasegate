@@ -1,0 +1,22 @@
+{
+  "attestation_outcomes": [
+    {
+      "bundle_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "truth": "VERIFIED",
+      "reason": "full_sigstore_chain_and_github_identity_verified"
+    },
+    {
+      "bundle_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "truth": "INDETERMINATE",
+      "reason": "unsupported"
+    }
+  ],
+  "attestation_set_sha256": "69be0319e0e0e012f3679016f0b083bc5c110a0cd8e1219e2ff967aeca54f7ed",
+  "evidence_truth": "VERIFIED",
+  "policy_authorization": "ALLOW",
+  "release_decision": "RELEASE",
+  "policy_reason": "source_and_signer_policy_bound",
+  "provenance_reason": "at_least_one_attestation_verified",
+  "decision_commitment": "c75aec40c88c959756687cffa2214511bdf7bdf3b6399e9aff5e81e7ff24ee65",
+  "receipt_id": "rgr_c75aec40c88c959756687cffa2214511bdf7bdf3b6399e9aff5e81e7ff24ee65"
+}

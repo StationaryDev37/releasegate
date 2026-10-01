@@ -49,6 +49,7 @@ def evaluation_id(v: dict[str, object]) -> str:
         str(v["artifact_sha256"]).lower(),
         str(v["trust_snapshot_sha256"]).lower(),
         str(v["verifier_build_sha256"]).lower(),
+        str(v["receipt_key_sha256"]).lower(),
     ])
 
 
@@ -60,9 +61,41 @@ def compose(truth: str, authorization: str) -> str:
     return "HOLD"
 
 
+def push_text(out: bytearray, value: str) -> None:
+    raw = value.encode()
+    out.extend(len(raw).to_bytes(4, "big"))
+    out.extend(raw)
+
+
+def attestation_set_commitment(outcomes: list[dict[str, str]]) -> str:
+    out = bytearray(b"ReleaseGate\x00AttestationSet\x00v1")
+    ordered = sorted(outcomes, key=lambda item: item["bundle_sha256"])
+    out.extend(len(ordered).to_bytes(4, "big"))
+    for item in ordered:
+        push_text(out, item["bundle_sha256"])
+        push_text(out, item["truth"])
+        push_text(out, item["reason"])
+    return hashlib.sha256(out).hexdigest()
+
+
+def decision_commitment(ev: dict[str, object], decision: dict[str, object]) -> str:
+    out = bytearray(b"ReleaseGate\x00DecisionCommitment\x00v1")
+    out.extend(int(ev["installation_id"]).to_bytes(8, "big", signed=True))
+    out.extend(int(ev["repository_id"]).to_bytes(8, "big", signed=True))
+    for value in [
+        ev["evaluation_id"], ev["repository"], ev["source_delivery_id"], ev["source_ref"],
+        ev["source_commit_sha"], ev["policy_sha256"], ev["artifact_sha256"],
+        ev["trust_snapshot_sha256"], ev["verifier_build_sha256"], ev["receipt_key_sha256"],
+        decision["evidence_truth"], decision["policy_authorization"], decision["release_decision"],
+        decision["policy_reason"], decision["provenance_reason"], decision["attestation_set_sha256"],
+    ]:
+        push_text(out, str(value))
+    return hashlib.sha256(out).hexdigest()
+
+
 def main() -> None:
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
-    assert cargo["package"]["version"] == "0.3.2"
+    assert cargo["package"]["version"] == "0.4.0"
     assert cargo["dependencies"]["attestation-verify"] == "=0.1.0"
     assert not (ROOT / ".env.example").exists()
 
@@ -84,7 +117,12 @@ def main() -> None:
         "active_release_policies",
         "trusted_source_events",
         "evaluation_contexts",
+        "release_evaluations",
+        "evaluation_attestation_outcomes",
+        "usage_events",
+        "github_check_outbox",
     }
+    assert "verification_receipts" not in tables
     assert required <= tables, required - tables
 
     # GitHub webhook HMAC reference vector.
@@ -146,24 +184,84 @@ def main() -> None:
     ev = json.loads((ROOT / "fixtures/adversarial/evaluation-context.json").read_text())
     assert evaluation_id(ev) == ev["evaluation_id"]
     con.execute(
-        """INSERT INTO evaluation_contexts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+        """INSERT INTO evaluation_contexts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             ev["evaluation_id"], 42, 99, "acme/widget", "delivery-1", "refs/tags/v1.2.3",
-            "b" * 40, p_hash, "c" * 64, "d" * 64, "e" * 64, "2026-09-30T00:00:04Z",
+            "b" * 40, p_hash, "c" * 64, "d" * 64, "e" * 64, "f" * 64,
+            "2026-09-30T00:00:04Z",
         ),
     )
     try:
         con.execute(
-            """INSERT INTO evaluation_contexts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+            """INSERT INTO evaluation_contexts VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 "rge_bad_scope", 42, 100, "acme/other", "delivery-1", "refs/tags/v1.2.3",
-                "b" * 40, p_hash, "c" * 64, "d" * 64, "e" * 64, "2026-09-30T00:00:05Z",
+                "b" * 40, p_hash, "c" * 64, "d" * 64, "e" * 64, "f" * 64,
+                "2026-09-30T00:00:05Z",
             ),
         )
     except sqlite3.IntegrityError:
         pass
     else:
         raise AssertionError("evaluation context accepted cross-repository evidence")
+
+    # Canonical commercial decision commitment: order-independent attestation set + frozen facts.
+    decision = json.loads((ROOT / "fixtures/adversarial/release-decision.json").read_text())
+    assert attestation_set_commitment(decision["attestation_outcomes"]) == decision["attestation_set_sha256"]
+    assert decision_commitment(ev, decision) == decision["decision_commitment"]
+    assert decision["receipt_id"] == "rgr_" + decision["decision_commitment"]
+
+    # Final decision, metering, and GitHub Check projection are one durable transaction boundary.
+    con.execute(
+        """INSERT INTO release_evaluations VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (
+            ev["evaluation_id"], decision["evidence_truth"], decision["policy_authorization"],
+            decision["release_decision"], decision["policy_reason"], decision["provenance_reason"],
+            decision["attestation_set_sha256"], decision["decision_commitment"], decision["receipt_id"],
+            "receipt-key-1", "f" * 64, "signed-jws-fixture", "0" * 64,
+            "2026-09-30T00:00:05Z",
+        ),
+    )
+    con.execute(
+        """INSERT INTO usage_events(installation_id,metric,quantity,source_key,repository,occurred_at)
+           VALUES(42,'release_evaluation_v1',1,?,'acme/widget','2026-09-30T00:00:05Z')""",
+        (ev["evaluation_id"],),
+    )
+    con.execute(
+        """INSERT INTO github_check_outbox(
+           evaluation_id,installation_id,repository_id,repository,head_sha,check_name,external_id,
+           conclusion,title,summary,state,created_at,updated_at
+           ) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)""",
+        (
+            ev["evaluation_id"],42,99,"acme/widget","b"*40,"ReleaseGate fixture",ev["evaluation_id"],
+            "success","Release authorized","fixture summary","2026-09-30T00:00:05Z","2026-09-30T00:00:05Z",
+        ),
+    )
+    assert con.execute(
+        "SELECT COUNT(*) FROM usage_events WHERE metric='release_evaluation_v1' AND source_key=?",
+        (ev["evaluation_id"],),
+    ).fetchone()[0] == 1
+    assert con.execute(
+        "SELECT state FROM github_check_outbox WHERE evaluation_id=?", (ev["evaluation_id"],)
+    ).fetchone()[0] == "pending"
+
+    # Check projection lease is non-stealable, reclaimable, and bounded.
+    changed = con.execute(
+        """UPDATE github_check_outbox SET state='leased',lease_token='check-lease-1',
+           lease_expires_unix=200,attempt_count=attempt_count+1
+           WHERE evaluation_id=? AND state='pending'""",
+        (ev["evaluation_id"],),
+    ).rowcount
+    assert changed == 1
+    assert con.execute(
+        "UPDATE github_check_outbox SET lease_token='stolen' WHERE evaluation_id=? AND state='leased' AND lease_expires_unix<=199",
+        (ev["evaluation_id"],),
+    ).rowcount == 0
+    assert con.execute(
+        """UPDATE github_check_outbox SET lease_token='check-lease-2',lease_expires_unix=400,
+           attempt_count=attempt_count+1 WHERE evaluation_id=? AND state='leased' AND lease_expires_unix<=200""",
+        (ev["evaluation_id"],),
+    ).rowcount == 1
 
     # Delivery lease/reclaim law at the persistence boundary.
     lease = json.loads((ROOT / "fixtures/adversarial/webhook-lease.json").read_text())
@@ -284,6 +382,10 @@ def main() -> None:
     assert "retry_budget_exhausted" in source_text
     assert "signature_header" in source_text
     assert "freeze_evaluation_context(" in source_text
+    assert "finalize_release_evaluation(" in source_text
+    assert "publish_check_run(" in source_text
+    assert "ReceiptSigner" in source_text
+    assert "release_evaluation_v1" in source_text
     assert "PolicyAuthorization" in source_text and "EvidenceTruth" in source_text
     evaluation_text = (ROOT / "src/evaluation.rs").read_text()
     assert "silicon" not in evaluation_text.lower(), "silicon must not enter evaluation identity"

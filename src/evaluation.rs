@@ -5,7 +5,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{error::AppError, policy::{ReleasePolicy, TrustedSourceContext}};
 
-const EVALUATION_SCHEMA_VERSION: &str = "releasegate-evaluation-v1";
+const EVALUATION_SCHEMA_VERSION: &str = "releasegate-evaluation-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, sqlx::FromRow)]
 pub struct EvaluationContext {
@@ -20,6 +20,7 @@ pub struct EvaluationContext {
     pub artifact_sha256: String,
     pub trust_snapshot_sha256: String,
     pub verifier_build_sha256: String,
+    pub receipt_key_sha256: String,
     pub created_at: String,
 }
 
@@ -30,6 +31,7 @@ impl EvaluationContext {
         artifact_sha256: &str,
         trust_snapshot_sha256: &str,
         verifier_build_sha256: &str,
+        receipt_key_sha256: &str,
         created_at: String,
     ) -> Result<Self, AppError> {
         if source.installation_id != policy.installation_id
@@ -45,6 +47,7 @@ impl EvaluationContext {
             ("policy_sha256", policy.policy_sha256.as_str()),
             ("trust_snapshot_sha256", trust_snapshot_sha256),
             ("verifier_build_sha256", verifier_build_sha256),
+            ("receipt_key_sha256", receipt_key_sha256),
         ] {
             if !is_sha256(digest) {
                 return Err(AppError::BadRequest(format!(
@@ -55,6 +58,7 @@ impl EvaluationContext {
         let artifact_sha256 = artifact_sha256.to_ascii_lowercase();
         let trust_snapshot_sha256 = trust_snapshot_sha256.to_ascii_lowercase();
         let verifier_build_sha256 = verifier_build_sha256.to_ascii_lowercase();
+        let receipt_key_sha256 = receipt_key_sha256.to_ascii_lowercase();
         let commitment = digest_join(&[
             EVALUATION_SCHEMA_VERSION,
             &source.installation_id.to_string(),
@@ -67,6 +71,7 @@ impl EvaluationContext {
             &artifact_sha256,
             &trust_snapshot_sha256,
             &verifier_build_sha256,
+            &receipt_key_sha256,
         ]);
         Ok(Self {
             evaluation_id: format!("rge_{commitment}"),
@@ -80,6 +85,7 @@ impl EvaluationContext {
             artifact_sha256,
             trust_snapshot_sha256,
             verifier_build_sha256,
+            receipt_key_sha256,
             created_at,
         })
     }

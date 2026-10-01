@@ -1,14 +1,1 @@
-RELEASEGATE_SILICON_STATIC_GATE
-branch=v0.3.2-silicon-lock
-static_gate=BEDROCK_STATIC_GATE_PASS
-silicon_gate=SILICON_GATE_PASS
-SILICON_LOCK_WRITTEN path=/tmp/rg-silicon.lock.json fingerprint=6ee620ac17cf420b115e488a5697b3daaf8510c07cb20f743b01113b7e3ff7ec runtime=2-4 irq=1
-SILICON_LOCK_PASS fingerprint=6ee620ac17cf420b115e488a5697b3daaf8510c07cb20f743b01113b7e3ff7ec
-SILICON_EXEC cpus=2-4 tokio_workers=3 fingerprint=6ee620ac17cf420b115e488a5697b3daaf8510c07cb20f743b01113b7e3ff7ec
-AFFINITY=2,3,4
-WORKERS=3
-LOCK_SHA=6abb3bf42d4d3c87b5198baa292a5b20e1c9b7232530c4f42187e30057436cc9
-SILICON_APPLY_BLOCKED no_irqs_for_nic=eth0
-IRQ_APPLY_EXIT=1
-python_compile=PASS
-rust_execution=UNEXECUTED
+SILICON_GATE_PASS

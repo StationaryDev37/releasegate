@@ -226,7 +226,6 @@ pub struct RecoveredDelivery {
     pub payload_bytes: Vec<u8>,
     pub signature_header: String,
     pub lease_token: String,
-    pub attempt: i64,
 }
 
 pub async fn lease_recoverable_deliveries(
@@ -720,8 +719,8 @@ pub async fn freeze_evaluation_context(
         r#"INSERT OR IGNORE INTO evaluation_contexts(
             evaluation_id,installation_id,repository_id,repository,source_delivery_id,
             source_ref,source_commit_sha,policy_sha256,artifact_sha256,trust_snapshot_sha256,
-            verifier_build_sha256,created_at
-        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)"#,
+            verifier_build_sha256,receipt_key_sha256,created_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
     )
     .bind(&context.evaluation_id)
     .bind(context.installation_id)
@@ -734,6 +733,7 @@ pub async fn freeze_evaluation_context(
     .bind(&context.artifact_sha256)
     .bind(&context.trust_snapshot_sha256)
     .bind(&context.verifier_build_sha256)
+    .bind(&context.receipt_key_sha256)
     .bind(&context.created_at)
     .execute(pool)
     .await?;
@@ -756,8 +756,424 @@ pub async fn get_evaluation_context(
     Ok(sqlx::query_as::<_, crate::evaluation::EvaluationContext>(
         r#"SELECT evaluation_id,installation_id,repository_id,repository,source_delivery_id,
            source_ref,source_commit_sha,policy_sha256,artifact_sha256,trust_snapshot_sha256,
-           verifier_build_sha256,created_at
+           verifier_build_sha256,receipt_key_sha256,created_at
            FROM evaluation_contexts WHERE evaluation_id=? LIMIT 1"#,
+    )
+    .bind(evaluation_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+const MAX_CHECK_ATTEMPTS: i64 = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReleaseEvaluationRecord {
+    pub evaluation_id: String,
+    pub evidence_truth: crate::decision::EvidenceTruth,
+    pub policy_authorization: crate::decision::PolicyAuthorization,
+    pub release_decision: crate::decision::ReleaseDecision,
+    pub policy_reason: String,
+    pub provenance_reason: String,
+    pub attestation_set_sha256: String,
+    pub decision_commitment: String,
+    pub receipt_id: String,
+    pub receipt_key_id: String,
+    pub receipt_key_sha256: String,
+    pub receipt_jws: String,
+    pub receipt_sha256: String,
+    pub completed_at: String,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct ReleaseEvaluationRow {
+    evaluation_id: String,
+    evidence_truth: String,
+    policy_authorization: String,
+    release_decision: String,
+    policy_reason: String,
+    provenance_reason: String,
+    attestation_set_sha256: String,
+    decision_commitment: String,
+    receipt_id: String,
+    receipt_key_id: String,
+    receipt_key_sha256: String,
+    receipt_jws: String,
+    receipt_sha256: String,
+    completed_at: String,
+}
+
+pub struct ReleaseFinalization<'a> {
+    pub context: &'a crate::evaluation::EvaluationContext,
+    pub evidence_truth: crate::decision::EvidenceTruth,
+    pub policy_authorization: crate::decision::PolicyAuthorization,
+    pub release_decision: crate::decision::ReleaseDecision,
+    pub policy_reason: &'a str,
+    pub provenance_reason: &'a str,
+    pub receipt_key_id: &'a str,
+    pub receipt: &'a crate::receipt::SignedReceipt,
+    pub bundle_outcomes: &'a [crate::provenance::BundleVerification],
+    pub check_name: &'a str,
+    pub check_conclusion: &'a str,
+    pub check_title: &'a str,
+    pub check_summary: &'a str,
+}
+
+pub async fn finalize_release_evaluation(
+    pool: &SqlitePool,
+    finalization: ReleaseFinalization<'_>,
+) -> Result<ReleaseEvaluationRecord, AppError> {
+    let completed_at = now_rfc3339()?;
+    let mut tx = pool.begin().await?;
+    let inserted = sqlx::query(
+        r#"INSERT OR IGNORE INTO release_evaluations(
+            evaluation_id,evidence_truth,policy_authorization,release_decision,
+            policy_reason,provenance_reason,attestation_set_sha256,decision_commitment,
+            receipt_id,receipt_key_id,receipt_key_sha256,receipt_jws,receipt_sha256,completed_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)"#,
+    )
+    .bind(&finalization.context.evaluation_id)
+    .bind(crate::receipt::truth_str(finalization.evidence_truth))
+    .bind(crate::receipt::authorization_str(finalization.policy_authorization))
+    .bind(crate::receipt::release_str(finalization.release_decision))
+    .bind(finalization.policy_reason)
+    .bind(finalization.provenance_reason)
+    .bind(&finalization.receipt.attestation_set_sha256)
+    .bind(&finalization.receipt.decision_commitment)
+    .bind(&finalization.receipt.receipt_id)
+    .bind(finalization.receipt_key_id)
+    .bind(&finalization.context.receipt_key_sha256)
+    .bind(&finalization.receipt.receipt_jws)
+    .bind(&finalization.receipt.receipt_sha256)
+    .bind(&completed_at)
+    .execute(&mut *tx)
+    .await?;
+
+    if inserted.rows_affected() == 1 {
+        for outcome in finalization.bundle_outcomes {
+            sqlx::query(
+                r#"INSERT INTO evaluation_attestation_outcomes(
+                    evaluation_id,bundle_sha256,evidence_truth,reason_code
+                ) VALUES(?,?,?,?)"#,
+            )
+            .bind(&finalization.context.evaluation_id)
+            .bind(&outcome.bundle_sha256)
+            .bind(crate::receipt::truth_str(outcome.truth))
+            .bind(&outcome.reason)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        sqlx::query(
+            r#"INSERT OR IGNORE INTO usage_events(
+                installation_id,metric,quantity,source_key,repository,occurred_at
+            ) VALUES(?,'release_evaluation_v1',1,?,?,?)"#,
+        )
+        .bind(finalization.context.installation_id)
+        .bind(&finalization.context.evaluation_id)
+        .bind(&finalization.context.repository)
+        .bind(&completed_at)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query(
+            r#"INSERT INTO github_check_outbox(
+                evaluation_id,installation_id,repository_id,repository,head_sha,check_name,
+                external_id,conclusion,title,summary,state,created_at,updated_at
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,'pending',?,?)"#,
+        )
+        .bind(&finalization.context.evaluation_id)
+        .bind(finalization.context.installation_id)
+        .bind(finalization.context.repository_id)
+        .bind(&finalization.context.repository)
+        .bind(&finalization.context.source_commit_sha)
+        .bind(finalization.check_name)
+        .bind(&finalization.context.evaluation_id)
+        .bind(finalization.check_conclusion)
+        .bind(finalization.check_title)
+        .bind(finalization.check_summary)
+        .bind(&completed_at)
+        .bind(&completed_at)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
+    let stored = get_release_evaluation(pool, &finalization.context.evaluation_id)
+        .await?
+        .ok_or(AppError::Internal("release evaluation disappeared after finalization"))?;
+    if stored.decision_commitment != finalization.receipt.decision_commitment
+        || stored.receipt_sha256 != finalization.receipt.receipt_sha256
+        || stored.receipt_key_sha256 != finalization.context.receipt_key_sha256
+    {
+        return Err(AppError::Conflict(
+            "evaluation id was already finalized with different decision evidence".into(),
+        ));
+    }
+    Ok(stored)
+}
+
+pub async fn get_release_evaluation(
+    pool: &SqlitePool,
+    evaluation_id: &str,
+) -> Result<Option<ReleaseEvaluationRecord>, AppError> {
+    let row = sqlx::query_as::<_, ReleaseEvaluationRow>(
+        r#"SELECT evaluation_id,evidence_truth,policy_authorization,release_decision,
+           policy_reason,provenance_reason,attestation_set_sha256,decision_commitment,
+           receipt_id,receipt_key_id,receipt_key_sha256,receipt_jws,receipt_sha256,completed_at
+           FROM release_evaluations WHERE evaluation_id=? LIMIT 1"#,
+    )
+    .bind(evaluation_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(release_evaluation_from_row).transpose()
+}
+
+fn release_evaluation_from_row(row: ReleaseEvaluationRow) -> Result<ReleaseEvaluationRecord, AppError> {
+    Ok(ReleaseEvaluationRecord {
+        evaluation_id: row.evaluation_id,
+        evidence_truth: parse_truth(&row.evidence_truth)?,
+        policy_authorization: parse_authorization(&row.policy_authorization)?,
+        release_decision: parse_release(&row.release_decision)?,
+        policy_reason: row.policy_reason,
+        provenance_reason: row.provenance_reason,
+        attestation_set_sha256: row.attestation_set_sha256,
+        decision_commitment: row.decision_commitment,
+        receipt_id: row.receipt_id,
+        receipt_key_id: row.receipt_key_id,
+        receipt_key_sha256: row.receipt_key_sha256,
+        receipt_jws: row.receipt_jws,
+        receipt_sha256: row.receipt_sha256,
+        completed_at: row.completed_at,
+    })
+}
+
+fn parse_truth(value: &str) -> Result<crate::decision::EvidenceTruth, AppError> {
+    match value {
+        "VERIFIED" => Ok(crate::decision::EvidenceTruth::Verified),
+        "INVALID" => Ok(crate::decision::EvidenceTruth::Invalid),
+        "INDETERMINATE" => Ok(crate::decision::EvidenceTruth::Indeterminate),
+        _ => Err(AppError::Conflict("stored evidence truth is invalid".into())),
+    }
+}
+
+fn parse_authorization(value: &str) -> Result<crate::decision::PolicyAuthorization, AppError> {
+    match value {
+        "ALLOW" => Ok(crate::decision::PolicyAuthorization::Allow),
+        "DENY" => Ok(crate::decision::PolicyAuthorization::Deny),
+        "INDETERMINATE" => Ok(crate::decision::PolicyAuthorization::Indeterminate),
+        _ => Err(AppError::Conflict("stored policy authorization is invalid".into())),
+    }
+}
+
+fn parse_release(value: &str) -> Result<crate::decision::ReleaseDecision, AppError> {
+    match value {
+        "RELEASE" => Ok(crate::decision::ReleaseDecision::Release),
+        "BLOCK" => Ok(crate::decision::ReleaseDecision::Block),
+        "HOLD" => Ok(crate::decision::ReleaseDecision::Hold),
+        _ => Err(AppError::Conflict("stored release decision is invalid".into())),
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CheckDispatchLease {
+    pub evaluation_id: String,
+    pub installation_id: i64,
+    pub repository_id: i64,
+    pub repository: String,
+    pub head_sha: String,
+    pub check_name: String,
+    pub external_id: String,
+    pub conclusion: String,
+    pub title: String,
+    pub summary: String,
+    pub lease_token: String,
+}
+
+pub async fn lease_check_dispatches(
+    pool: &SqlitePool,
+    lease_seconds: i64,
+    limit: i64,
+) -> Result<Vec<CheckDispatchLease>, AppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    terminalize_exhausted_checks(pool, now).await?;
+    let candidates: Vec<String> = sqlx::query_scalar(
+        r#"SELECT evaluation_id FROM github_check_outbox
+           WHERE attempt_count < ? AND (
+             (state='pending' AND next_attempt_unix <= ?)
+             OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?)
+           ) ORDER BY created_at ASC LIMIT ?"#,
+    )
+    .bind(MAX_CHECK_ATTEMPTS)
+    .bind(now)
+    .bind(now)
+    .bind(limit.clamp(1, 100))
+    .fetch_all(pool)
+    .await?;
+
+    let mut leases = Vec::with_capacity(candidates.len());
+    for evaluation_id in candidates {
+        let token = Uuid::new_v4().simple().to_string();
+        let expires = now.saturating_add(lease_seconds);
+        let changed = sqlx::query(
+            r#"UPDATE github_check_outbox
+               SET state='leased',lease_token=?,lease_expires_unix=?,
+                   attempt_count=attempt_count+1,next_attempt_unix=0,last_error_code=NULL,updated_at=?
+               WHERE evaluation_id=? AND attempt_count < ? AND (
+                 (state='pending' AND next_attempt_unix <= ?)
+                 OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?)
+               )"#,
+        )
+        .bind(&token)
+        .bind(expires)
+        .bind(now_rfc3339()?)
+        .bind(&evaluation_id)
+        .bind(MAX_CHECK_ATTEMPTS)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await?;
+        if changed.rows_affected() != 1 {
+            continue;
+        }
+        let row: (i64, i64, String, String, String, String, String, String, String) =
+            sqlx::query_as(
+                r#"SELECT installation_id,repository_id,repository,head_sha,check_name,
+                   external_id,conclusion,title,summary
+                   FROM github_check_outbox WHERE evaluation_id=? AND lease_token=?"#,
+            )
+            .bind(&evaluation_id)
+            .bind(&token)
+            .fetch_one(pool)
+            .await?;
+        leases.push(CheckDispatchLease {
+            evaluation_id,
+            installation_id: row.0,
+            repository_id: row.1,
+            repository: row.2,
+            head_sha: row.3,
+            check_name: row.4,
+            external_id: row.5,
+            conclusion: row.6,
+            title: row.7,
+            summary: row.8,
+            lease_token: token,
+        });
+    }
+    Ok(leases)
+}
+
+pub async fn complete_check_dispatch(
+    pool: &SqlitePool,
+    evaluation_id: &str,
+    lease_token: &str,
+    check_run_id: i64,
+) -> Result<(), AppError> {
+    if check_run_id <= 0 {
+        return Err(AppError::Conflict("GitHub check run id must be positive".into()));
+    }
+    let result = sqlx::query(
+        r#"UPDATE github_check_outbox
+           SET state='sent',lease_token=NULL,lease_expires_unix=NULL,
+               check_run_id=?,last_error_code=NULL,updated_at=?
+           WHERE evaluation_id=? AND state='leased' AND lease_token=?"#,
+    )
+    .bind(check_run_id)
+    .bind(now_rfc3339()?)
+    .bind(evaluation_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict("GitHub check lease ownership was lost".into()));
+    }
+    Ok(())
+}
+
+pub async fn release_check_dispatch(
+    pool: &SqlitePool,
+    evaluation_id: &str,
+    lease_token: &str,
+    error_code: &str,
+) -> Result<(), AppError> {
+    let attempt: i64 = sqlx::query_scalar(
+        "SELECT attempt_count FROM github_check_outbox WHERE evaluation_id=? AND state='leased' AND lease_token=?",
+    )
+    .bind(evaluation_id)
+    .bind(lease_token)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| AppError::Conflict("GitHub check lease ownership was lost".into()))?;
+    let exponent = u32::try_from(attempt.saturating_sub(1).clamp(0, 6)).unwrap_or(6);
+    let delay = 5_i64.saturating_mul(2_i64.saturating_pow(exponent)).min(300);
+    let next_attempt = OffsetDateTime::now_utc().unix_timestamp().saturating_add(delay);
+    let result = sqlx::query(
+        r#"UPDATE github_check_outbox
+           SET state='pending',lease_token=NULL,lease_expires_unix=NULL,next_attempt_unix=?,
+               last_error_code=?,updated_at=?
+           WHERE evaluation_id=? AND state='leased' AND lease_token=?"#,
+    )
+    .bind(next_attempt)
+    .bind(error_code)
+    .bind(now_rfc3339()?)
+    .bind(evaluation_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict("GitHub check lease ownership was lost".into()));
+    }
+    Ok(())
+}
+
+pub async fn dead_letter_check_dispatch(
+    pool: &SqlitePool,
+    evaluation_id: &str,
+    lease_token: &str,
+    error_code: &str,
+) -> Result<(), AppError> {
+    let result = sqlx::query(
+        r#"UPDATE github_check_outbox
+           SET state='dead',lease_token=NULL,lease_expires_unix=NULL,
+               last_error_code=?,updated_at=?
+           WHERE evaluation_id=? AND state='leased' AND lease_token=?"#,
+    )
+    .bind(error_code)
+    .bind(now_rfc3339()?)
+    .bind(evaluation_id)
+    .bind(lease_token)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() != 1 {
+        return Err(AppError::Conflict("GitHub check lease ownership was lost".into()));
+    }
+    Ok(())
+}
+
+async fn terminalize_exhausted_checks(pool: &SqlitePool, now: i64) -> Result<(), AppError> {
+    sqlx::query(
+        r#"UPDATE github_check_outbox
+           SET state='dead',lease_token=NULL,lease_expires_unix=NULL,
+               last_error_code='retry_budget_exhausted',updated_at=?
+           WHERE attempt_count >= ? AND (
+             (state='pending' AND next_attempt_unix <= ?)
+             OR (state='leased' AND COALESCE(lease_expires_unix,0) <= ?)
+           )"#,
+    )
+    .bind(now_rfc3339()?)
+    .bind(MAX_CHECK_ATTEMPTS)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn check_dispatch_state(
+    pool: &SqlitePool,
+    evaluation_id: &str,
+) -> Result<Option<(String, Option<i64>, Option<String>)>, AppError> {
+    Ok(sqlx::query_as(
+        "SELECT state,check_run_id,last_error_code FROM github_check_outbox WHERE evaluation_id=? LIMIT 1",
     )
     .bind(evaluation_id)
     .fetch_optional(pool)

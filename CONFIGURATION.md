@@ -1,30 +1,51 @@
-# ReleaseGate bedrock configuration
+# ReleaseGate v0.4 configuration
 
-ReleaseGate intentionally ships no example secrets and no default authority credentials.
+ReleaseGate ships no example credentials and no fallback authority values. Missing security-critical inputs fail startup.
 
-Required runtime inputs:
+## GitHub authority
 
-- `RELEASEGATE_GITHUB_APP_ID` — numeric GitHub App identity used as the JWT issuer.
-- `RELEASEGATE_GITHUB_APP_PRIVATE_KEY_PEM` — RSA private key used only for short-lived GitHub App JWTs.
-- `RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET` — HMAC secret used only by GitHub App webhook ingress.
-- `RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET` — separate HMAC secret used only by Marketplace ingress.
-- `RELEASEGATE_CONTROL_TOKEN` — authority to create/activate immutable release policy versions.
-- `RELEASEGATE_EVALUATOR_TOKEN` — authority to freeze evaluation contexts.
-- `RELEASEGATE_AUDITOR_TOKEN` — read-only authority for frozen evaluation evidence.
-- `RELEASEGATE_GITHUB_BUNDLE_HOST` — exact DNS hostname accepted for attestation bundle egress.
-- `RELEASEGATE_SILICON_LOCK_PATH` — canonical silicon lock file generated and validated by `scripts/silicon_ctl.py`.
-- `RELEASEGATE_SILICON_LOCK_SHA256` — SHA-256 of the exact lock bytes executed under.
-- `RELEASEGATE_SILICON_FINGERPRINT` — host-topology identity committed by the lock.
-- `RELEASEGATE_RUNTIME_CPUSET` — exact CPU set applied to the ReleaseGate process.
-- `TOKIO_WORKER_THREADS` — must equal the number of locked runtime CPUs.
+- `RELEASEGATE_GITHUB_APP_ID` — numeric GitHub App ID used as JWT issuer.
+- `RELEASEGATE_GITHUB_APP_PRIVATE_KEY_PEM` — RSA private key used only for GitHub App JWTs.
+- `RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET` — HMAC secret used only for GitHub App webhook ingress.
+- `RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET` — independent HMAC secret used only for Marketplace entitlement ingress.
+- `RELEASEGATE_GITHUB_BUNDLE_HOST` — exact allowed attestation-bundle hostname. Retrieval requires HTTPS, no credentials, no redirects, public DNS addresses only, and pins the validated addresses.
 
-Optional operational inputs:
+GitHub installation tokens are minted per repository and per operation. Attestation retrieval requests only `attestations:read`. Check projection requests only `checks:write`.
+
+## ReleaseGate authority
+
+- `RELEASEGATE_CONTROL_TOKEN` — create/activate immutable policy versions.
+- `RELEASEGATE_EVALUATOR_TOKEN` — freeze/execute release evaluations.
+- `RELEASEGATE_AUDITOR_TOKEN` — read completed evaluation evidence.
+
+These authorities are intentionally not interchangeable.
+
+## Receipt authority
+
+- `RELEASEGATE_RECEIPT_PRIVATE_KEY_PEM` — RSA private key used only to sign ReleaseGate decision receipts.
+- `RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM` — matching public key returned by `/v1/receipt-key` for independent verification.
+- `RELEASEGATE_RECEIPT_KEY_ID` — operator-assigned stable key identifier; validated for bounded ASCII identity syntax.
+
+Startup signs and verifies an internal key probe. A mismatched receipt keypair fails startup. The evaluation context binds the canonical public-key SHA-256, so key rotation cannot silently reuse an old evaluation identity.
+
+## Persistence / leases
+
+- `RELEASEGATE_DATABASE_URL` — defaults to `sqlite://releasegate.db?mode=rwc`.
+- `RELEASEGATE_DELIVERY_LEASE_SECONDS` — webhook lease duration; default `120`, accepted `30..900`.
+- `RELEASEGATE_CHECK_LEASE_SECONDS` — GitHub Check outbox lease duration; default `120`, accepted `30..900`.
+
+Webhook recovery and Check projection both use ownership-bound leases with bounded retries. A durable final release decision is never rewritten because a Check delivery failed.
+
+## Runtime / silicon
 
 - `RELEASEGATE_BIND` — defaults to `127.0.0.1:8080`.
-- `RELEASEGATE_DATABASE_URL` — defaults to `sqlite://releasegate.db?mode=rwc`.
-- `RELEASEGATE_DELIVERY_LEASE_SECONDS` — defaults to 120; accepted range 30..900.
 - `RELEASEGATE_LOG` — tracing filter.
+- `RELEASEGATE_SILICON_LOCK_PATH`
+- `RELEASEGATE_SILICON_LOCK_SHA256`
+- `RELEASEGATE_SILICON_FINGERPRINT`
+- `RELEASEGATE_RUNTIME_CPUSET`
+- `TOKIO_WORKER_THREADS`
 
-Every secret-bearing value is stored in a redacted `Secret` type. No configuration structure derives `Debug`.
+Silicon settings are operational constraints, not release evidence. `scripts/silicon_ctl.py exec` is the intended injector because it also applies process affinity and verifies the host lock.
 
-Silicon variables are normally injected only by `scripts/silicon_ctl.py exec`; hand-setting them does not configure process affinity and will fail runtime attestation if the observed CPU set differs. The silicon fingerprint is operational evidence only and never enters release/evaluation identity.
+Secret-bearing configuration is wrapped in ReleaseGate's redacted `Secret` type. The configuration object itself does not derive `Debug`.

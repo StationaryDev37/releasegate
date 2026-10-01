@@ -1,35 +1,80 @@
-# ReleaseGate — silicon-locked bedrock
+# ReleaseGate v0.4 — commercial release-decision loop
 
-ReleaseGate is a fail-closed release-decision kernel for GitHub artifacts. Its job is narrow: bind authenticated source facts to immutable policy, retrieve supported GitHub provenance, establish cryptographic truth, and compose that truth with authorization without conflating the two.
+ReleaseGate is a fail-closed GitHub release-control kernel. It converts authenticated source events, immutable release policy, GitHub artifact provenance, and a frozen trust snapshot into one deterministic release decision, then emits independently verifiable evidence, a durable GitHub Check projection, and one idempotent usage event.
 
-## Bedrock invariants
+It is not a generic webhook service, CI dashboard, policy CRUD application, or attestation generator.
 
-1. **Truth is not authorization.** `EvidenceTruth`, `PolicyAuthorization`, and `ReleaseDecision` are separate state machines. Only `VERIFIED + ALLOW` can produce `RELEASE`.
-2. **Webhook evidence is durable before side effects.** After HMAC authentication, the exact payload, digest, event identity, and validated signature header are persisted in a recoverable inbox. Recovery re-hashes and re-verifies HMAC before dispatch; expired leases are reclaimed internally, retryable failures use bounded exponential backoff, and the retry budget is finite.
-3. **Replay is identity-bound.** `(ingress source, delivery id)` may never be rebound to different authenticated bytes or a different event type.
-4. **Policy is immutable.** Policy content is deterministically hashed; activation changes only a pointer.
-5. **Evaluation facts freeze.** Source delivery, repository/ref/commit, policy hash, artifact digest, trust snapshot, and executing binary hash are committed into a deterministic evaluation identity before provenance execution.
-6. **Trust is selected by identity, never list position.** The supported Rekor v1 log is matched by the exact SHA-256 identity shared by its `logId` and SPKI.
-7. **Bundle egress is pinned.** Bundle URLs must use the configured exact hostname, HTTPS, no credentials, no redirect, and a DNS result containing only public addresses; the validated address is pinned into the request client.
-8. **Authority is split.** Webhook secrets, control authority, evaluator authority, and auditor authority are distinct secrets with redacted debug behavior.
-9. **Silicon is constrained, never trusted for truth.** A content-addressed host lock binds NIC/CPU topology to IRQ/runtime placement. Runtime startup re-attests the exact lock bytes and actual process CPU affinity. Hardware placement is operational evidence only and cannot alter evaluation identity.
-10. **No optimistic release.** Missing/unsupported/uncertain evidence is `INDETERMINATE`; it cannot release.
+## Closed execution law
+
+```text
+GitHub HMAC event
+      ↓
+authenticated durable source event
+      ↓
+immutable active policy + exact source/ref/commit
+      ↓
+frozen EvaluationContext v2
+      ↓
+GitHub attestation retrieval
+      ↓
+Sigstore provenance verification
+      ↓
+EvidenceTruth × PolicyAuthorization
+      ↓
+ReleaseDecision
+      ↓
+deterministic DecisionCommitment
+      ↓
+RS256 signed receipt
+      ↓
+atomic finalization
+   ├── release decision
+   ├── per-bundle evidence outcomes
+   ├── exactly-one usage event
+   └── durable GitHub Check outbox
+      ↓
+idempotent GitHub Check publication
+```
+
+Only `VERIFIED + ALLOW` produces `RELEASE`. Everything else becomes `BLOCK` or `HOLD`; missing or unsupported evidence can never be promoted into release truth.
+
+## Kernel invariants
+
+1. **Truth, authorization, and release are different state machines.** Cryptographic invalidity cannot be confused with policy denial.
+2. **Evaluation facts freeze before verification.** Repository/source/ref/commit, policy, artifact, trust snapshot, executing verifier binary, and receipt-key identity are committed into `EvaluationContext v2`.
+3. **Receipts bind decisions, not mutable presentation.** The custom decision commitment is deterministic and excludes issuance time; receipt identity is `rgr_<decision_commitment>`.
+4. **Receipt authority is separate from GitHub authority.** GitHub App RSA credentials cannot sign ReleaseGate receipts. Receipt key rotation changes evaluation identity.
+5. **Metering is transaction-coupled to finalization.** A finalized evaluation creates exactly one `release_evaluation_v1` usage event or none. Duplicate billing for the same evaluation is rejected by storage identity.
+6. **GitHub Check delivery is an outbox projection, not part of truth.** A transient GitHub outage cannot roll back or reinterpret an already-finalized decision.
+7. **Check publication is recoverably idempotent.** The evaluation ID is GitHub `external_id`; recovery queries the exact commit/check name before retrying POST.
+8. **Installation tokens are least-privilege by operation.** Attestation reads receive only `attestations:read`; Check publication receives only `checks:write`.
+9. **Webhook bytes remain evidence.** Authenticated payload bytes are persisted before side effects and are re-hashed/re-authenticated during recovery.
+10. **No hardware optimization establishes truth.** Silicon lock/affinity is operational evidence only.
 
 ## Runtime surface
 
-- `POST /webhooks/github/app` — authenticated installation/push ingress.
-- `POST /webhooks/github/marketplace` — separately authenticated subscription ingress.
-- `POST /v1/policies/active` — control authority; stores and activates immutable policy.
-- `POST /v1/evaluations` — evaluator authority; freezes context, retrieves supported provenance, verifies it, and composes the release decision.
-- `GET /v1/evaluations/:id` — auditor authority; reads frozen evaluation facts.
-- `GET /healthz`, `GET /readyz` — process/database liveness only.
+- `POST /webhooks/github/app` — GitHub App HMAC ingress.
+- `POST /webhooks/github/marketplace` — separately authenticated entitlement ingress.
+- `POST /v1/policies/active` — control authority; creates/activates immutable policy.
+- `POST /v1/evaluations` — evaluator authority; executes or idempotently returns one frozen release evaluation.
+- `GET /v1/evaluations/:id` — auditor authority; returns completed decision, signed receipt, and Check projection state.
+- `GET /v1/receipt-key` — public verification material for ReleaseGate receipts.
+- `GET /healthz`, `GET /readyz` — liveness/readiness only.
 
-No dashboard, generic CRUD surface, placeholder verification endpoint, or example secret file is shipped.
+No dashboard, ORM, generic repository layer, generic message bus, placeholder API, fake integration, or example production secret is shipped.
 
-## Verification gates
+## Durable finalization boundary
 
-`scripts/static_gate.py` is an independent non-Rust gate for migrations, canonical vectors, state laws, replay/recovery semantics, trust identity, and source invariants. `scripts/silicon_gate.py` separately proves lock generation, host validation, tamper rejection, and deterministic placement.
+The decision row, attestation outcomes, billable usage event, and GitHub Check outbox entry are committed in one SQLite transaction. The Check worker owns a finite lease and retry budget; success records the returned Check Run ID, retryable failures back off, permanent failures dead-letter with a stable error code.
 
-`scripts/rust_gate.sh` is the executable Rust release gate. It refuses to claim PASS without Rust/Cargo/rustfmt/Clippy and a reviewed `Cargo.lock`.
+A GitHub Check failure therefore means **projection failure**, not loss of release truth.
 
-See `STATUS.md` for executed evidence. Configuration is defined in `CONFIGURATION.md`; no secret values are supplied by the repository.
+## Evidence gates
+
+- `scripts/static_gate.py` — bedrock migrations, replay/recovery, trust identity, state law and canonical evaluation vectors.
+- `scripts/commercial_gate.py` — v0.4 schema upgrade, deterministic receipt/evidence vectors, one-charge law, Check outbox recovery, least-privilege source assertions, and placeholder rejection.
+- `scripts/silicon_gate.py` — hardware lock/affinity invariants.
+- `scripts/rust_gate.sh` — authoritative Rust format/check/Clippy/test/release-build gate. It refuses to report PASS without a reviewed `Cargo.lock` and a clean source tree.
+- `scripts/termux_rust_gate.sh` — phone-native toolchain/bootstrap path for the same authoritative Rust gate.
+
+`STATUS.md` records executed evidence without inferring compiler success from static analysis.
