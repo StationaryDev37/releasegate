@@ -72,6 +72,11 @@ def main() -> int:
         must(database.execute("PRAGMA foreign_key_check").fetchall() == [], "migration_fk")
         must(database.execute("PRAGMA integrity_check").fetchone()[0] == "ok", "migration_integrity")
 
+    toolchain = (ROOT / "rust-toolchain.toml").read_text()
+    rust_gate = (ROOT / "scripts/rust_gate.sh").read_text()
+    must('channel = "1.90.0"' in toolchain, "toolchain_pin")
+    must("expected_rustc=1.90.0" in rust_gate and "expected_cargo=1.90.0" in rust_gate, "toolchain_enforcement")
+
     # The two compiler defects that escaped the older static gate must never regress.
     github = (ROOT / "src/github.rs").read_text()
     must("check_name: &str,\n        check_name: &str," not in github, "duplicate_check_parameter")

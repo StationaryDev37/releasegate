@@ -12,8 +12,19 @@ for tool in rustc cargo rustfmt clippy-driver; do
   }
 done
 
-printf 'rustc=%s\n' "$(rustc --version)"
-printf 'cargo=%s\n' "$(cargo --version)"
+RUSTC_VERSION="$(rustc --version)"
+CARGO_VERSION="$(cargo --version)"
+printf 'rustc=%s\n' "$RUSTC_VERSION"
+printf 'cargo=%s\n' "$CARGO_VERSION"
+
+case "$RUSTC_VERSION" in
+  'rustc 1.90.0 '*) ;;
+  *) printf 'RUST_GATE_BLOCKED expected_rustc=1.90.0 observed=%s\n' "$RUSTC_VERSION" >&2; exit 24 ;;
+esac
+case "$CARGO_VERSION" in
+  'cargo 1.90.0 '*) ;;
+  *) printf 'RUST_GATE_BLOCKED expected_cargo=1.90.0 observed=%s\n' "$CARGO_VERSION" >&2; exit 25 ;;
+esac
 
 if [[ ! -f Cargo.lock ]]; then
   cargo generate-lockfile

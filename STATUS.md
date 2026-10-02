@@ -36,3 +36,18 @@ This file distinguishes implemented source from executed evidence. Static gates 
 | Production release | BLOCKED | requires `scripts/rust_gate.sh` → `RUST_GATE_PASS` plus live GitHub roundtrip evidence |
 
 No compile, test, Check delivery, Marketplace collection, or production status is inferred from source inspection.
+
+## v0.5 production-candidate closure
+
+The production-host boundary is now implemented on branch `v0.5-production-pack`:
+
+- hardened systemd runtime service and dedicated Caddy HTTPS edge;
+- create-once host materialization with generated scoped tokens/webhook secrets and a distinct RSA-3072 receipt key;
+- exact GitHub App contract and content-addressed runtime manifest;
+- silicon lock enforced at process exec;
+- SQLite online backup with post-backup integrity/foreign-key verification;
+- decision-derived operational snapshot instead of a generic dashboard;
+- exact Rust 1.90.0/Cargo 1.90.0 enforcement in the authoritative Rust gate;
+- repaired `github.rs` duplicate Check parameter and malformed bundle-client call discovered during production source review.
+
+Static, commercial, silicon, production, SQLite integrity, backup and Git-history gates are executed and passing. Rust format/check/Clippy/tests/release build remain **BLOCKED** in this runtime because `rustc`/Cargo are absent. Production release is therefore **NOT CLAIMED**.

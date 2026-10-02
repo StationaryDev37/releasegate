@@ -78,3 +78,7 @@ A GitHub Check failure therefore means **projection failure**, not loss of relea
 - `scripts/termux_rust_gate.sh` — phone-native toolchain/bootstrap path for the same authoritative Rust gate.
 
 `STATUS.md` records executed evidence without inferring compiler success from static analysis.
+
+## Production candidate
+
+`docs/PRODUCTION.md` defines the v0.5 single-host production boundary. `scripts/production_materialize.py` creates host-specific authority exactly once, installs the runtime/systemd boundary, emits the exact GitHub App contract, commits the deployed binary/key/silicon identities into `runtime-manifest.json`, and generates the HTTPS allow-list. `scripts/production_gate.py` is the non-Rust production invariant gate; it does not substitute for `scripts/rust_gate.sh`.
