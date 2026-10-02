@@ -1,0 +1,43 @@
+[Unit]
+Description=ReleaseGate deterministic release-control kernel
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=releasegate
+Group=releasegate
+WorkingDirectory=/var/lib/releasegate
+ExecStartPre=/usr/bin/python3 /opt/releasegate/lib/silicon_ctl.py validate --lock /etc/releasegate/silicon.lock
+ExecStart=/opt/releasegate/bin/releasegate-launch
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=30s
+KillSignal=SIGTERM
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/lib/releasegate
+ReadOnlyPaths=/etc/releasegate /opt/releasegate
+
+[Install]
+WantedBy=multi-user.target

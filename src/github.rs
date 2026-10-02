@@ -532,8 +532,7 @@ impl GithubApi {
             .build()
             .map_err(|_| GithubApiError::ClientBuild)?;
         let source_url_sha256 = hex::encode(Sha256::digest(item.bundle_url.as_bytes()));
-        let response = self
-            bundle_client
+        let response = bundle_client
             .get(url)
             .send()
             .await

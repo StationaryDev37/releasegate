@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+CONFIG=/etc/releasegate/runtime.env
+SECRETS=/etc/releasegate/secrets
+LOCK=/etc/releasegate/silicon.lock
+BIN=/opt/releasegate/bin/releasegate
+CTL=/opt/releasegate/lib/silicon_ctl.py
+
+[[ -r "$CONFIG" ]] || { echo "RELEASEGATE_START_BLOCKED missing=$CONFIG" >&2; exit 40; }
+[[ -r "$LOCK" ]] || { echo "RELEASEGATE_START_BLOCKED missing=$LOCK" >&2; exit 40; }
+[[ -x "$BIN" ]] || { echo "RELEASEGATE_START_BLOCKED missing_executable=$BIN" >&2; exit 40; }
+
+set -a
+# shellcheck disable=SC1090
+source "$CONFIG"
+set +a
+
+read_secret() {
+  local name=$1 file="$SECRETS/$2"
+  [[ -r "$file" ]] || { echo "RELEASEGATE_START_BLOCKED missing_secret=$file" >&2; exit 41; }
+  local value
+  value=$(cat "$file")
+  [[ -n "$value" ]] || { echo "RELEASEGATE_START_BLOCKED empty_secret=$file" >&2; exit 41; }
+  export "$name=$value"
+}
+
+read_secret RELEASEGATE_GITHUB_APP_PRIVATE_KEY_PEM github-app-private-key.pem
+read_secret RELEASEGATE_GITHUB_APP_WEBHOOK_SECRET github-app-webhook-secret
+read_secret RELEASEGATE_GITHUB_MARKETPLACE_WEBHOOK_SECRET marketplace-webhook-secret
+read_secret RELEASEGATE_CONTROL_TOKEN control-token
+read_secret RELEASEGATE_EVALUATOR_TOKEN evaluator-token
+read_secret RELEASEGATE_AUDITOR_TOKEN auditor-token
+read_secret RELEASEGATE_RECEIPT_PRIVATE_KEY_PEM receipt-private-key.pem
+read_secret RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM receipt-public-key.pem
+
+exec /usr/bin/python3 "$CTL" exec --lock "$LOCK" -- "$BIN"
