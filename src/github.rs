@@ -45,6 +45,7 @@ struct GithubAppClaims {
 
 #[derive(Clone)]
 pub struct GithubAppJwtSigner {
+    app_id: u64,
     issuer: String,
     key: EncodingKey,
 }
@@ -57,6 +58,7 @@ impl GithubAppJwtSigner {
         let key = EncodingKey::from_rsa_pem(private_key_pem)
             .map_err(|_| AppError::BadRequest("invalid GitHub App RSA private key".into()))?;
         Ok(Self {
+            app_id,
             issuer: app_id.to_string(),
             key,
         })
@@ -228,14 +230,28 @@ struct CheckOutput<'a> {
 }
 
 #[derive(Debug, Deserialize)]
+struct CheckRunApp {
+    id: u64,
+}
+
+#[derive(Debug, Deserialize)]
 struct CheckRunResponse {
     id: i64,
     external_id: Option<String>,
+    app: CheckRunApp,
 }
 
 #[derive(Debug, Deserialize)]
 struct CheckRunsResponse {
     check_runs: Vec<CheckRunResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct CheckRunListQuery<'a> {
+    check_name: &'a str,
+    filter: &'static str,
+    per_page: u8,
+    app_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +268,7 @@ pub struct RawAttestationBundle {
 
 #[derive(Clone)]
 pub struct GithubApi {
+    app_id: u64,
     client: reqwest::Client,
     signer: Arc<GithubAppJwtSigner>,
     token_cache: Arc<RwLock<HashMap<(i64, i64, TokenScope), CachedInstallationToken>>>,
@@ -282,6 +299,7 @@ impl GithubApi {
             return Err(GithubApiError::UnsafeBundleUrl);
         }
         Ok(Self {
+            app_id: signer.app_id,
             client,
             signer: Arc::new(signer),
             token_cache: Arc::new(RwLock::new(HashMap::new())),
@@ -459,7 +477,12 @@ impl GithubApi {
             .client
             .get(&list_url)
             .header(AUTHORIZATION, format!("Bearer {token}"))
-            .query(&[("check_name", check_name), ("filter", "all"), ("per_page", "100")])
+            .query(&CheckRunListQuery {
+                check_name,
+                filter: "all",
+                per_page: 100,
+                app_id: self.app_id,
+            })
             .send()
             .await
             .map_err(|_| GithubApiError::Transport)?;
@@ -479,12 +502,10 @@ impl GithubApi {
             .json()
             .await
             .map_err(|_| GithubApiError::InvalidCheckResponse)?;
-        if let Some(found) = listed
-            .check_runs
-            .into_iter()
-            .find(|run| run.external_id.as_deref() == Some(external_id))
+        if let Some(check_run_id) =
+            matching_check_run_id(listed.check_runs, self.app_id, external_id)
         {
-            return Ok(found.id);
+            return Ok(check_run_id);
         }
 
         let create_url = format!("https://api.github.com/repos/{owner}/{repo}/check-runs");
@@ -512,7 +533,10 @@ impl GithubApi {
             .json()
             .await
             .map_err(|_| GithubApiError::InvalidCheckResponse)?;
-        if created.id <= 0 || created.external_id.as_deref() != Some(external_id) {
+        if created.id <= 0
+            || created.app.id != self.app_id
+            || created.external_id.as_deref() != Some(external_id)
+        {
             return Err(GithubApiError::InvalidCheckResponse);
         }
         Ok(created.id)
@@ -568,6 +592,20 @@ impl GithubApi {
             raw_json,
         })
     }
+}
+
+fn matching_check_run_id(
+    runs: Vec<CheckRunResponse>,
+    app_id: u64,
+    external_id: &str,
+) -> Option<i64> {
+    runs.into_iter()
+        .find(|run| {
+            run.app.id == app_id
+                && run.id > 0
+                && run.external_id.as_deref() == Some(external_id)
+        })
+        .map(|run| run.id)
 }
 
 fn decode_bundle_json(
@@ -684,17 +722,28 @@ fn is_public_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_public_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    if ip.is_loopback() || ip.is_multicast() || ip.is_unspecified() {
+    // Never let an IPv4 address bypass the IPv4 policy by arriving in mapped IPv6 form.
+    if ip.to_ipv4_mapped().is_some() {
         return false;
     }
-    // fc00::/7 unique local, fe80::/10 link-local, 2001:db8::/32 documentation.
-    if (segments[0] & 0xfe00) == 0xfc00
-        || (segments[0] & 0xffc0) == 0xfe80
+
+    let segments = ip.segments();
+    // ReleaseGate egress accepts only IPv6 global-unicast space (2000::/3).
+    // Special-purpose ranges inside that space remain fail-closed below.
+    if (segments[0] & 0xe000) != 0x2000 {
+        return false;
+    }
+
+    // IETF protocol assignments 2001:0000::/23, documentation 2001:db8::/32,
+    // deprecated 6to4 2002::/16, and documentation 3fff::/20.
+    if (segments[0] == 0x2001 && (segments[1] & 0xfe00) == 0)
         || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        || segments[0] == 0x2002
+        || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
     {
         return false;
     }
+
     true
 }
 
@@ -707,7 +756,10 @@ mod tests {
         pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
     };
 
-    use super::{GithubAppClaims, GithubAppJwtSigner, is_public_ip, validate_bundle_url, verify_webhook_signature};
+    use super::{
+        CheckRunApp, CheckRunResponse, GithubAppClaims, GithubAppJwtSigner, is_public_ip,
+        matching_check_run_id, validate_bundle_url, verify_webhook_signature,
+    };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
     #[test]
@@ -760,6 +812,29 @@ mod tests {
         assert_eq!(decoded.claims.exp, now + (9 * 60));
         assert!(decoded.claims.exp - decoded.claims.iat <= 10 * 60);
     }
+
+    #[test]
+    fn check_replay_is_bound_to_releasegate_app_identity() {
+        let runs = vec![
+            CheckRunResponse {
+                id: 11,
+                external_id: Some("rge_target".to_owned()),
+                app: CheckRunApp { id: 999 },
+            },
+            CheckRunResponse {
+                id: 12,
+                external_id: Some("rge_other".to_owned()),
+                app: CheckRunApp { id: 424242 },
+            },
+            CheckRunResponse {
+                id: 13,
+                external_id: Some("rge_target".to_owned()),
+                app: CheckRunApp { id: 424242 },
+            },
+        ];
+        assert_eq!(matching_check_run_id(runs, 424242, "rge_target"), Some(13));
+    }
+
     #[test]
     fn bundle_url_requires_exact_configured_host() {
         let good = reqwest::Url::parse("https://attest.example.test/object.json").expect("url fixture");
@@ -779,10 +854,16 @@ mod tests {
             "fc00::1".parse().expect("ipv6 fixture"),
             "fe80::1".parse().expect("ipv6 fixture"),
             "2001:db8::1".parse().expect("ipv6 fixture"),
+            "2001:2::1".parse().expect("ipv6 fixture"),
+            "2002::1".parse().expect("ipv6 fixture"),
+            "3fff::1".parse().expect("ipv6 fixture"),
+            "::ffff:127.0.0.1".parse().expect("ipv6 mapped loopback fixture"),
+            "::ffff:8.8.8.8".parse().expect("ipv6 mapped public fixture"),
         ] {
             assert!(!is_public_ip(ip));
         }
         assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(is_public_ip("2606:4700:4700::1111".parse().expect("public ipv6 fixture")));
     }
 
 }

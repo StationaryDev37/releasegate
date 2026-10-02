@@ -57,3 +57,7 @@ The production-host boundary is now implemented and audit-hardened on branch `v0
 - encoded target-runtime silicon-lock generation and webhook-secret rotation semantics in the production contract.
 
 Static, commercial, silicon, production, SQLite integrity, backup and Git-history gates are executed and passing. Rust format/check/Clippy/tests/release build remain **BLOCKED** in this runtime because `rustc`/Cargo are absent. Production release is therefore **NOT CLAIMED**.
+
+## v0.5 RC2 hardening
+
+The RC2 hardening branch adds three release-specific invariants discovered during the post-RC1 adversarial review: invariant-critical recovery and GitHub Check workers are process-supervised so silent worker death forces service shutdown/restart; ambiguous Check-run recovery is bound to ReleaseGate's exact GitHub App ID in addition to the evaluation `external_id`; and bundle egress rejects IPv4-mapped/reserved IPv6 forms before DNS-pinned retrieval. These changes do not promote Rust execution status: the authoritative Rust gate remains required.

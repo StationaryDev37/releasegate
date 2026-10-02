@@ -81,3 +81,7 @@ Production release is forbidden until `scripts/rust_gate.sh` reports `RUST_GATE_
 ## Production rotation and host-placement invariants
 
 Receipt public-key authority is exactly one PEM public-key block; concatenated keyrings are rejected to keep key identity unambiguous. Silicon locks are generated on the final target runtime placement and are never portable release truth. Webhook secret replacement must not occur while nonterminal durable deliveries exist unless those deliveries are deliberately dispositioned first, because recovery re-authenticates exact persisted bytes against the installed secret and fails closed on mismatch.
+
+## Worker and Check identity invariants
+
+Webhook recovery and GitHub Check dispatch are invariant-critical workers. Unexpected termination of either worker is a process-fatal event: ReleaseGate shuts down the serving process so the service manager can restart a complete machine rather than leave a deceptively healthy partial service. Check retry recovery is scoped to the configured GitHub App ID and evaluation external ID; another app's Check cannot satisfy ReleaseGate's idempotency lookup. Bundle egress rejects IPv4-mapped IPv6 and non-global/special-purpose IPv6 ranges before pinning a resolved address.

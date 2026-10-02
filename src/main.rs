@@ -12,7 +12,13 @@ mod secret;
 mod silicon;
 mod store;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use axum::{
     body::Bytes,
@@ -75,10 +81,11 @@ async fn main() -> anyhow::Result<()> {
         receipt_public_key_pem: Arc::from(config.receipt_signing_public_key_pem.clone()),
     };
 
+    let critical_worker_failed = Arc::new(AtomicBool::new(false));
     let recovery_state = state.clone();
-    tokio::spawn(async move { recovery_loop(recovery_state).await });
+    let recovery_task = tokio::spawn(async move { recovery_loop(recovery_state).await });
     let check_state = state.clone();
-    tokio::spawn(async move { check_dispatch_loop(check_state).await });
+    let check_task = tokio::spawn(async move { check_dispatch_loop(check_state).await });
 
     let app = router(state);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
@@ -91,8 +98,15 @@ async fn main() -> anyhow::Result<()> {
         "releasegate listening"
     );
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown())
+        .with_graceful_shutdown(shutdown(
+            recovery_task,
+            check_task,
+            critical_worker_failed.clone(),
+        ))
         .await?;
+    if critical_worker_failed.load(Ordering::SeqCst) {
+        anyhow::bail!("invariant-critical worker exited unexpectedly");
+    }
     Ok(())
 }
 
@@ -787,7 +801,34 @@ fn init_tracing() {
         .init();
 }
 
-async fn shutdown() {
+async fn shutdown(
+    mut recovery_task: tokio::task::JoinHandle<()>,
+    mut check_task: tokio::task::JoinHandle<()>,
+    critical_worker_failed: Arc<AtomicBool>,
+) {
+    tokio::select! {
+        () = shutdown_signal() => {
+            tracing::info!("shutdown signal received");
+        },
+        result = &mut recovery_task => {
+            critical_worker_failed.store(true, Ordering::SeqCst);
+            match result {
+                Ok(()) => tracing::error!("webhook recovery worker exited unexpectedly"),
+                Err(error) => tracing::error!(%error, "webhook recovery worker failed"),
+            }
+        },
+        result = &mut check_task => {
+            critical_worker_failed.store(true, Ordering::SeqCst);
+            match result {
+                Ok(()) => tracing::error!("GitHub check worker exited unexpectedly"),
+                Err(error) => tracing::error!(%error, "GitHub check worker failed"),
+            }
+        },
+    }
+    tokio::time::sleep(Duration::from_millis(50)).await;
+}
+
+async fn shutdown_signal() {
     let ctrl_c = async {
         if let Err(error) = tokio::signal::ctrl_c().await {
             tracing::error!(%error, "failed to install ctrl-c handler");
@@ -813,5 +854,4 @@ async fn shutdown() {
         () = ctrl_c => {},
         () = terminate => {},
     }
-    tokio::time::sleep(Duration::from_millis(50)).await;
 }

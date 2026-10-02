@@ -97,6 +97,21 @@ def main() -> int:
     duplicate_sources = sorted(path.name for path in (ROOT / "src").glob("*(1).rs"))
     must(not duplicate_sources, f"duplicate_source_files={duplicate_sources}")
 
+
+    main_rs = (ROOT / "src/main.rs").read_text()
+    must("let recovery_task = tokio::spawn" in main_rs, "recovery_worker_supervision")
+    must("let check_task = tokio::spawn" in main_rs, "check_worker_supervision")
+    must("critical_worker_failed = Arc::new(AtomicBool::new(false))" in main_rs, "worker_failure_latch")
+    must("critical_worker_failed.store(true, Ordering::SeqCst)" in main_rs, "worker_failure_signal")
+    must("anyhow::bail!(\"invariant-critical worker exited unexpectedly\")" in main_rs, "worker_failure_nonzero_exit")
+
+    must("app_id: self.app_id" in github, "check_list_app_identity_filter")
+    must("matching_check_run_id(listed.check_runs, self.app_id, external_id)" in github, "existing_check_app_identity_binding")
+    must("check_replay_is_bound_to_releasegate_app_identity" in github, "check_app_identity_adversarial_fixture")
+    must("created.app.id != self.app_id" in github, "created_check_app_identity_binding")
+    must("ip.to_ipv4_mapped().is_some()" in github, "ipv6_mapped_address_rejection")
+    must("(segments[0] & 0xe000) != 0x2000" in github, "ipv6_global_unicast_boundary")
+
     receipt = (ROOT / "src/receipt.rs").read_text()
     must(
         "receipt RSA public key must contain exactly one PEM block" in receipt,
