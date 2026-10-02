@@ -13,6 +13,7 @@ WorkingDirectory=/var/lib/releasegate
 ExecStartPre=/usr/bin/python3 /opt/releasegate/lib/silicon_ctl.py validate --lock /etc/releasegate/silicon.lock
 ExecStart=/opt/releasegate/bin/releasegate-launch
 Restart=on-failure
+RestartPreventExitStatus=40 41
 RestartSec=2s
 TimeoutStopSec=30s
 KillSignal=SIGTERM

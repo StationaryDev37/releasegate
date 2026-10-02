@@ -47,6 +47,7 @@ def main() -> int:
                 "NoNewPrivileges=yes",
                 "ProtectSystem=strict",
                 "ReadWritePaths=/var/lib/releasegate",
+                "RestartPreventExitStatus=40 41",
             ]
         ),
         "systemd_kernel_hardening",
@@ -81,6 +82,26 @@ def main() -> int:
     github = (ROOT / "src/github.rs").read_text()
     must("check_name: &str,\n        check_name: &str," not in github, "duplicate_check_parameter")
     must("let response = self\n            bundle_client" not in github, "malformed_bundle_client_call")
+
+    store = (ROOT / "src/store.rs").read_text()
+    must("pub attempt: i64" in store, "recovered_delivery_attempt_field")
+    must(".max_connections(1)" in store, "sqlite_single_writer")
+    must("PRAGMA busy_timeout = 5000" in store, "sqlite_busy_timeout")
+
+    cargo = (ROOT / "Cargo.toml").read_text()
+    must('version = "0.5.0"' in cargo, "package_version")
+    must('rust-version = "1.90"' in cargo, "package_rust_version")
+    must('releasegate/0.4.0' not in github, "stale_user_agent")
+    must('env!("CARGO_PKG_VERSION")' in github, "dynamic_user_agent")
+
+    duplicate_sources = sorted(path.name for path in (ROOT / "src").glob("*(1).rs"))
+    must(not duplicate_sources, f"duplicate_source_files={duplicate_sources}")
+
+    receipt = (ROOT / "src/receipt.rs").read_text()
+    must(
+        "receipt RSA public key must contain exactly one PEM block" in receipt,
+        "single_public_key_pem_contract",
+    )
 
     print("PRODUCTION_GATE_PASS")
     return 0

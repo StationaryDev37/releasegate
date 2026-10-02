@@ -239,37 +239,70 @@ fn push_text(out: &mut Vec<u8>, value: &str) {
 fn canonical_pem_identity(pem: &[u8]) -> Result<String, AppError> {
     let text = std::str::from_utf8(pem)
         .map_err(|_| AppError::BadRequest("receipt RSA public key is not UTF-8 PEM".into()))?;
-    let mut inside = false;
+    let mut begin_label: Option<&str> = None;
     let mut body = String::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.starts_with("-----BEGIN ") && line.ends_with(" PUBLIC KEY-----") {
-            if inside {
-                return Err(AppError::BadRequest("receipt RSA public key has nested PEM blocks".into()));
-            }
-            inside = true;
+    let mut complete = false;
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
             continue;
         }
-        if line.starts_with("-----END ") && line.ends_with(" PUBLIC KEY-----") {
-            if !inside || body.is_empty() {
-                return Err(AppError::BadRequest("receipt RSA public key PEM block is malformed".into()));
-            }
-            inside = false;
-            break;
+        if complete {
+            return Err(AppError::BadRequest(
+                "receipt RSA public key must contain exactly one PEM block".into(),
+            ));
         }
-        if inside {
-            if line.is_empty()
-                || !line
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
-            {
-                return Err(AppError::BadRequest("receipt RSA public key PEM body is malformed".into()));
+        if begin_label.is_none() {
+            let label = line
+                .strip_prefix("-----BEGIN ")
+                .and_then(|value| value.strip_suffix("-----"))
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "receipt RSA public key must contain exactly one public-key PEM block".into(),
+                    )
+                })?;
+            if label != "PUBLIC KEY" && label != "RSA PUBLIC KEY" {
+                return Err(AppError::BadRequest(
+                    "receipt RSA public key PEM label is unsupported".into(),
+                ));
             }
-            body.push_str(line);
+            begin_label = Some(label);
+            continue;
         }
+
+        if let Some(end_label) = line
+            .strip_prefix("-----END ")
+            .and_then(|value| value.strip_suffix("-----"))
+        {
+            if Some(end_label) != begin_label || body.is_empty() {
+                return Err(AppError::BadRequest(
+                    "receipt RSA public key PEM block is malformed".into(),
+                ));
+            }
+            complete = true;
+            continue;
+        }
+        if line.starts_with("-----BEGIN ") {
+            return Err(AppError::BadRequest(
+                "receipt RSA public key must contain exactly one PEM block".into(),
+            ));
+        }
+        if !line
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+        {
+            return Err(AppError::BadRequest(
+                "receipt RSA public key PEM body is malformed".into(),
+            ));
+        }
+        body.push_str(line);
     }
-    if inside || body.is_empty() {
-        return Err(AppError::BadRequest("receipt RSA public key PEM block is incomplete".into()));
+
+    if begin_label.is_none() || !complete || body.is_empty() {
+        return Err(AppError::BadRequest(
+            "receipt RSA public key PEM block is incomplete".into(),
+        ));
     }
     Ok(hex::encode(Sha256::digest(body.as_bytes())))
 }
@@ -336,6 +369,12 @@ mod tests {
         let a = b"-----BEGIN PUBLIC KEY-----\nQUJDREVGRw==\n-----END PUBLIC KEY-----\n";
         let b = b"-----BEGIN PUBLIC KEY-----\r\nQUJD\r\nREVGRw==\r\n-----END PUBLIC KEY-----\r\n";
         assert_eq!(canonical_pem_identity(a), canonical_pem_identity(b));
+    }
+
+    #[test]
+    fn public_key_identity_rejects_concatenated_pem_blocks() {
+        let concatenated = b"-----BEGIN PUBLIC KEY-----\nQUJD\n-----END PUBLIC KEY-----\n\n-----BEGIN PUBLIC KEY-----\nREVG\n-----END PUBLIC KEY-----\n";
+        assert!(canonical_pem_identity(concatenated).is_err());
     }
 
     #[test]

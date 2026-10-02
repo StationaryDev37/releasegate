@@ -1,4 +1,4 @@
-# ReleaseGate v0.4 — commercial release-decision loop
+# ReleaseGate v0.5 — production release candidate
 
 ReleaseGate is a fail-closed GitHub release-control kernel. It converts authenticated source events, immutable release policy, GitHub artifact provenance, and a frozen trust snapshot into one deterministic release decision, then emits independently verifiable evidence, a durable GitHub Check projection, and one idempotent usage event.
 

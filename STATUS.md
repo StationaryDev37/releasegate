@@ -1,4 +1,4 @@
-# ReleaseGate v0.4 commercial-loop status
+# ReleaseGate v0.5 production-candidate status
 
 This file distinguishes implemented source from executed evidence. Static gates do not imply Rust compilation.
 
@@ -39,7 +39,7 @@ No compile, test, Check delivery, Marketplace collection, or production status i
 
 ## v0.5 production-candidate closure
 
-The production-host boundary is now implemented on branch `v0.5-production-pack`:
+The production-host boundary is now implemented and audit-hardened on branch `v0.5-production-rc1-fix`:
 
 - hardened systemd runtime service and dedicated Caddy HTTPS edge;
 - create-once host materialization with generated scoped tokens/webhook secrets and a distinct RSA-3072 receipt key;
@@ -48,6 +48,12 @@ The production-host boundary is now implemented on branch `v0.5-production-pack`
 - SQLite online backup with post-backup integrity/foreign-key verification;
 - decision-derived operational snapshot instead of a generic dashboard;
 - exact Rust 1.90.0/Cargo 1.90.0 enforcement in the authoritative Rust gate;
-- repaired `github.rs` duplicate Check parameter and malformed bundle-client call discovered during production source review.
+- repaired `github.rs` duplicate Check parameter and malformed bundle-client call discovered during production source review;
+- repaired `RecoveredDelivery.attempt` compile blocker and locked recovery logging to the persisted retry count;
+- serialized SQLite write transitions through one connection with a bounded busy timeout;
+- bound the package/User-Agent identity to `0.5.0` from `CARGO_PKG_VERSION`;
+- made receipt public-key identity reject concatenated PEM keyrings;
+- prevented systemd restart storms for launcher exits `40`/`41`;
+- encoded target-runtime silicon-lock generation and webhook-secret rotation semantics in the production contract.
 
 Static, commercial, silicon, production, SQLite integrity, backup and Git-history gates are executed and passing. Rust format/check/Clippy/tests/release build remain **BLOCKED** in this runtime because `rustc`/Cargo are absent. Production release is therefore **NOT CLAIMED**.

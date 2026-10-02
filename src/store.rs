@@ -7,10 +7,17 @@ use crate::error::AppError;
 const MAX_DELIVERY_ATTEMPTS: i64 = 12;
 
 pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
+    // ReleaseGate deliberately uses one SQLite connection. Every durable state
+    // transition that can affect a release decision is serialized through this
+    // writer, while WAL still permits external/read-only operational snapshots.
+    // Multiple pooled writers add lock contention without increasing SQLite's
+    // write concurrency and make transaction ordering harder to reason about.
     let pool = SqlitePoolOptions::new()
-        .max_connections(8)
+        .max_connections(1)
         .connect(database_url)
         .await?;
+    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
+    sqlx::query("PRAGMA busy_timeout = 5000").execute(&pool).await?;
     sqlx::migrate!().run(&pool).await?;
     Ok(pool)
 }
@@ -226,6 +233,7 @@ pub struct RecoveredDelivery {
     pub payload_bytes: Vec<u8>,
     pub signature_header: String,
     pub lease_token: String,
+    pub attempt: i64,
 }
 
 pub async fn lease_recoverable_deliveries(

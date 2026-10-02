@@ -1,4 +1,4 @@
-# ReleaseGate v0.4 security boundary
+# ReleaseGate v0.5 security boundary
 
 ReleaseGate is fail-closed. Unsupported evidence, ambiguous identity, unavailable trust, failed cryptographic verification, or unresolved policy cannot become a release authorization.
 
@@ -76,3 +76,8 @@ The outbox uses ownership-bound leases, bounded retry/backoff and terminal dead-
 ## Release predicate
 
 Production release is forbidden until `scripts/rust_gate.sh` reports `RUST_GATE_PASS`, the generated `Cargo.lock` has been reviewed and committed, and live GitHub webhook/attestation/Check/receipt vectors pass. Static evidence alone is never promoted into production-release status.
+
+
+## Production rotation and host-placement invariants
+
+Receipt public-key authority is exactly one PEM public-key block; concatenated keyrings are rejected to keep key identity unambiguous. Silicon locks are generated on the final target runtime placement and are never portable release truth. Webhook secret replacement must not occur while nonterminal durable deliveries exist unless those deliveries are deliberately dispositioned first, because recovery re-authenticates exact persisted bytes against the installed secret and fails closed on mismatch.

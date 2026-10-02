@@ -88,7 +88,7 @@ def apply_migrations(con: sqlite3.Connection, paths: list[Path]) -> None:
 
 def main() -> None:
     cargo = tomllib.loads((ROOT / "Cargo.toml").read_text())
-    assert cargo["package"]["version"] == "0.4.0"
+    assert cargo["package"]["version"] == "0.5.0"
     assert cargo["dependencies"]["attestation-verify"] == "=0.1.0"
     assert cargo["dependencies"]["jsonwebtoken"]["version"] == "=11.1.0"
 

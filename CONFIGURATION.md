@@ -1,4 +1,4 @@
-# ReleaseGate v0.4 configuration
+# ReleaseGate v0.5 configuration
 
 ReleaseGate ships no example credentials and no fallback authority values. Missing security-critical inputs fail startup.
 
