@@ -1,0 +1,157 @@
+name: ReleaseGate RC2 execution probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Commit or branch to execute"
+        required: true
+        default: "087333eaed84c10d3e73cced95d43a6c76065a3b"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: releasegate-rc2-execution-probe
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  FROZEN_RC2_COMMIT: 087333eaed84c10d3e73cced95d43a6c76065a3b
+  TARGET_INPUT: ${{ inputs.target }}
+
+jobs:
+  execute:
+    name: Rust 1.90.0 / selected RC2 target
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout selected target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target }}
+          fetch-depth: 1
+
+      - name: Install exact Rust 1.90.0 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v rustup >/dev/null
+          rustup toolchain install 1.90.0 \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --no-self-update
+          rustup default 1.90.0
+          rustc --version | grep -Eq '^rustc 1\.90\.0 '
+          cargo --version | grep -Eq '^cargo 1\.90\.0 '
+
+      - name: Create evidence directory
+        shell: bash
+        run: mkdir -p execution-evidence
+
+      - name: Record and assert execution identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          expected=""
+          if printf '%s' "$TARGET_INPUT" | grep -Eq '^[0-9a-f]{40}$'; then
+            expected="$TARGET_INPUT"
+          else
+            expected="$(git rev-parse "$TARGET_INPUT^{commit}" 2>/dev/null || true)"
+          fi
+          if [ -z "$expected" ]; then
+            git fetch --no-tags --depth=1 origin "$TARGET_INPUT"
+            expected="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          fi
+          {
+            echo "target_input=$TARGET_INPUT"
+            echo "commit=$actual"
+            echo "expected_commit=$expected"
+            echo "frozen_rc2=$FROZEN_RC2_COMMIT"
+            rustc --version --verbose
+            cargo --version --verbose
+            rustfmt --version
+            cargo clippy --version
+          } | tee execution-evidence/00-identity.txt
+          test "$actual" = "$expected"
+          if [ "$TARGET_INPUT" = "$FROZEN_RC2_COMMIT" ]; then
+            test "$actual" = "$FROZEN_RC2_COMMIT"
+          fi
+
+      - name: Formatting gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if cargo fmt --all -- --check >execution-evidence/10-fmt.txt 2>&1; then
+            cat execution-evidence/10-fmt.txt
+            echo FMT_PASS | tee execution-evidence/11-fmt-result.txt
+          else
+            status=$?
+            cat execution-evidence/10-fmt.txt
+            cargo fmt --all
+            git diff --binary -- . ':!.github/workflows/releasegate-rc2-execution-probe.yml' \
+              > execution-evidence/12-fmt-fix.patch
+            echo "FMT_FAILED fix_patch=execution-evidence/12-fmt-fix.patch" \
+              | tee execution-evidence/11-fmt-result.txt
+            exit "$status"
+          fi
+
+      - name: Resolve dependencies and generate lockfile
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo generate-lockfile 2>&1 | tee execution-evidence/20-generate-lockfile.txt
+          sha256sum Cargo.lock | tee execution-evidence/21-cargo-lock.sha256
+          cargo metadata --locked --format-version=1 \
+            > execution-evidence/22-cargo-metadata.json
+          cargo tree --locked --all-features \
+            > execution-evidence/23-cargo-tree.txt
+
+      - name: Cargo check with warnings denied
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUSTFLAGS='-D warnings' cargo check --locked --all-targets --all-features 2>&1 \
+            | tee execution-evidence/30-cargo-check.txt
+
+      - name: Clippy with warnings denied
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo clippy --locked --all-targets --all-features -- -D warnings 2>&1 \
+            | tee execution-evidence/40-clippy.txt
+
+      - name: Test suite
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --locked --all-targets --all-features 2>&1 \
+            | tee execution-evidence/50-tests.txt
+
+      - name: Release build
+        shell: bash
+        run: |
+          set -euo pipefail
+          RUSTFLAGS='-D warnings' cargo build --locked --release 2>&1 \
+            | tee execution-evidence/60-release-build.txt
+          sha256sum target/release/releasegate \
+            | tee execution-evidence/61-release-binary.sha256
+          file target/release/releasegate \
+            | tee execution-evidence/62-release-binary-file.txt
+          echo EXECUTION_PROBE_PASS | tee execution-evidence/99-result.txt
+
+      - name: Upload execution evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: releasegate-rc2-execution-evidence
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            Cargo.lock
+            execution-evidence/
+            target/release/releasegate
