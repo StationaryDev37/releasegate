@@ -14,8 +14,8 @@ mod store;
 
 use std::{
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
     time::Duration,
 };
@@ -29,13 +29,15 @@ use axum::{
     Json, Router,
 };
 use config::Config;
-use secret::Secret;
-use error::AppError;
 use decision::{compose, EvidenceTruth};
-use model::{CheckProjection, EvaluationRequest, EvaluationResultResponse, ReceiptKeyResponse, WebhookAck};
-use serde_json::Value;
+use error::AppError;
+use model::{
+    CheckProjection, EvaluationRequest, EvaluationResultResponse, ReceiptKeyResponse, WebhookAck,
+};
 use policy::{ReleasePolicy, ReleasePolicySpec, TrustedSourceContext};
 use receipt::ReceiptSigner;
+use secret::Secret;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
@@ -201,19 +203,28 @@ async fn handle_github_webhook(
         store::DeliveryLease::DuplicateApplied => {
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(WebhookAck { status: "duplicate_applied", delivery_id: delivery }),
+                Json(WebhookAck {
+                    status: "duplicate_applied",
+                    delivery_id: delivery,
+                }),
             ));
         }
         store::DeliveryLease::DuplicateRejected => {
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(WebhookAck { status: "duplicate_rejected", delivery_id: delivery }),
+                Json(WebhookAck {
+                    status: "duplicate_rejected",
+                    delivery_id: delivery,
+                }),
             ));
         }
         store::DeliveryLease::InFlight => {
             return Ok((
                 StatusCode::ACCEPTED,
-                Json(WebhookAck { status: "in_flight", delivery_id: delivery }),
+                Json(WebhookAck {
+                    status: "in_flight",
+                    delivery_id: delivery,
+                }),
             ));
         }
     };
@@ -224,7 +235,10 @@ async fn handle_github_webhook(
             store::complete_delivery(&state.db, source, &delivery, &lease_token).await?;
             Ok((
                 StatusCode::ACCEPTED,
-                Json(WebhookAck { status: "applied", delivery_id: delivery }),
+                Json(WebhookAck {
+                    status: "applied",
+                    delivery_id: delivery,
+                }),
             ))
         }
         Err(error) => {
@@ -336,13 +350,15 @@ async fn process_recovered_delivery(
     )
     .await;
     match result {
-        Ok(()) => store::complete_delivery(
-            &state.db,
-            &delivery.source,
-            &delivery.delivery_id,
-            &delivery.lease_token,
-        )
-        .await,
+        Ok(()) => {
+            store::complete_delivery(
+                &state.db,
+                &delivery.source,
+                &delivery.delivery_id,
+                &delivery.lease_token,
+            )
+            .await
+        }
         Err(error) => {
             let code = error.stable_code();
             if error.is_retryable() {
@@ -410,17 +426,8 @@ async fn handle_installation(db: &SqlitePool, payload: &Value) -> Result<(), App
         .filter(|value| matches!(*value, "User" | "Organization"))
         .ok_or_else(|| AppError::BadRequest("installation.account.type unsupported".into()))?;
 
-    store::upsert_installation(
-        db,
-        installation_id,
-        account_id,
-        login,
-        account_type,
-        active,
-    )
-    .await
+    store::upsert_installation(db, installation_id, account_id, login, account_type, active).await
 }
-
 
 async fn handle_push_source(
     db: &SqlitePool,
@@ -471,8 +478,8 @@ async fn put_active_policy(
     Json(spec): Json<ReleasePolicySpec>,
 ) -> Result<Json<ReleasePolicy>, AppError> {
     authorize(&state.config.control_token, &headers)?;
-    let policy = ReleasePolicy::new(spec)
-        .map_err(|error| AppError::BadRequest(error.to_string()))?;
+    let policy =
+        ReleasePolicy::new(spec).map_err(|error| AppError::BadRequest(error.to_string()))?;
     if !store::installation_active(&state.db, policy.installation_id).await? {
         return Err(AppError::Unauthorized);
     }
@@ -491,7 +498,10 @@ async fn freeze_evaluation(
         return Err(AppError::Unauthorized);
     }
     if req.artifact_sha256.len() != 64
-        || !req.artifact_sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !req
+            .artifact_sha256
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
     {
         return Err(AppError::BadRequest(
             "artifact_sha256 must be exactly 64 hexadecimal characters".into(),
@@ -522,48 +532,55 @@ async fn freeze_evaluation(
     )?;
     let context = store::freeze_evaluation_context(&state.db, &context).await?;
 
-    if let Some(existing) = store::get_release_evaluation(&state.db, &context.evaluation_id).await? {
-        return Ok(Json(build_evaluation_response(&state, context, existing).await?));
+    if let Some(existing) = store::get_release_evaluation(&state.db, &context.evaluation_id).await?
+    {
+        return Ok(Json(
+            build_evaluation_response(&state, context, existing).await?,
+        ));
     }
 
-    let (evidence_truth, provenance_reason, bundle_outcomes) =
-        if authorization == decision::PolicyAuthorization::Allow {
-            let expectation = policy_resolution
-                .expectation
-                .as_ref()
-                .ok_or(AppError::Internal("allowed policy resolution omitted verifier expectation"))?;
-            match provenance::retrieve_and_store(
-                &state.github,
-                &state.db,
-                context.installation_id,
-                context.repository_id,
-                &context.repository,
-                &context.artifact_sha256,
-            )
-            .await
-            {
-                Ok(bundles) => {
-                    let verification = provenance::verify_provenance(
-                        &context.artifact_sha256,
-                        expectation,
-                        &bundles,
-                    );
-                    (verification.truth, verification.reason, verification.bundles)
-                }
-                Err(provenance::ProvenanceGateError::Github(_)) => (
-                    EvidenceTruth::Indeterminate,
-                    "attestation_retrieval_unavailable".to_owned(),
-                    Vec::new(),
-                ),
-                Err(provenance::ProvenanceGateError::Store(error)) => return Err(error),
+    let (evidence_truth, provenance_reason, bundle_outcomes) = if authorization
+        == decision::PolicyAuthorization::Allow
+    {
+        let expectation = policy_resolution
+            .expectation
+            .as_ref()
+            .ok_or(AppError::Internal(
+                "allowed policy resolution omitted verifier expectation",
+            ))?;
+        match provenance::retrieve_and_store(
+            &state.github,
+            &state.db,
+            context.installation_id,
+            context.repository_id,
+            &context.repository,
+            &context.artifact_sha256,
+        )
+        .await
+        {
+            Ok(bundles) => {
+                let verification =
+                    provenance::verify_provenance(&context.artifact_sha256, expectation, &bundles);
+                (
+                    verification.truth,
+                    verification.reason,
+                    verification.bundles,
+                )
             }
-        } else {
-            (
+            Err(provenance::ProvenanceGateError::Github(_)) => (
                 EvidenceTruth::Indeterminate,
-                "provenance_not_evaluated_without_policy_allow".to_owned(),
+                "attestation_retrieval_unavailable".to_owned(),
                 Vec::new(),
-            )
-        };
+            ),
+            Err(provenance::ProvenanceGateError::Store(error)) => return Err(error),
+        }
+    } else {
+        (
+            EvidenceTruth::Indeterminate,
+            "provenance_not_evaluated_without_policy_allow".to_owned(),
+            Vec::new(),
+        )
+    };
     let release_decision = compose(evidence_truth, authorization);
     let receipt = state.receipt_signer.sign_decision(
         &context,
@@ -614,7 +631,9 @@ async fn freeze_evaluation(
         receipt_id = %stored.receipt_id,
         "release evaluation durably finalized"
     );
-    Ok(Json(build_evaluation_response(&state, context, stored).await?))
+    Ok(Json(
+        build_evaluation_response(&state, context, stored).await?,
+    ))
 }
 
 async fn get_evaluation(
@@ -629,7 +648,9 @@ async fn get_evaluation(
     let result = store::get_release_evaluation(&state.db, &id)
         .await?
         .ok_or(AppError::NotFound)?;
-    Ok(Json(build_evaluation_response(&state, context, result).await?))
+    Ok(Json(
+        build_evaluation_response(&state, context, result).await?,
+    ))
 }
 
 async fn get_receipt_key(State(state): State<AppState>) -> Json<ReceiptKeyResponse> {
@@ -651,12 +672,16 @@ async fn build_evaluation_response(
             "release result is bound to a different frozen evaluation context".into(),
         ));
     }
-    let (check_state, check_run_id, last_error_code) = store::check_dispatch_state(
-        &state.db,
-        &context.evaluation_id,
-    )
-    .await?
-    .unwrap_or_else(|| ("missing".to_owned(), None, Some("check_outbox_missing".to_owned())));
+    let (check_state, check_run_id, last_error_code) =
+        store::check_dispatch_state(&state.db, &context.evaluation_id)
+            .await?
+            .unwrap_or_else(|| {
+                (
+                    "missing".to_owned(),
+                    None,
+                    Some("check_outbox_missing".to_owned()),
+                )
+            });
     Ok(EvaluationResultResponse {
         context,
         evidence_truth: result.evidence_truth,

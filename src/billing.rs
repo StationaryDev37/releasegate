@@ -36,7 +36,9 @@ pub async fn apply_marketplace_event(pool: &SqlitePool, payload: &Value) -> Resu
     };
 
     let plan = purchase.get("plan");
-    let plan_id = plan.and_then(|value| value.get("id")).and_then(Value::as_i64);
+    let plan_id = plan
+        .and_then(|value| value.get("id"))
+        .and_then(Value::as_i64);
     let plan_name = plan
         .and_then(|value| value.get("name"))
         .and_then(Value::as_str);

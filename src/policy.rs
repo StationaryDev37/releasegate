@@ -222,7 +222,10 @@ fn validate_repository(value: &str) -> Result<(), PolicyError> {
 
 fn validate_ref(value: &str) -> Result<(), PolicyError> {
     let valid = value.starts_with("refs/heads/") || value.starts_with("refs/tags/");
-    if !valid || value.len() <= "refs/tags/".len() || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*')) {
+    if !valid
+        || value.len() <= "refs/tags/".len()
+        || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*'))
+    {
         return Err(PolicyError::InvalidRefRule);
     }
     Ok(())
@@ -230,7 +233,10 @@ fn validate_ref(value: &str) -> Result<(), PolicyError> {
 
 fn validate_ref_prefix(value: &str) -> Result<(), PolicyError> {
     let valid = value.starts_with("refs/heads/") || value.starts_with("refs/tags/");
-    if !valid || value.len() <= "refs/tags/".len() || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*')) {
+    if !valid
+        || value.len() <= "refs/tags/".len()
+        || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*'))
+    {
         return Err(PolicyError::InvalidRefRule);
     }
     Ok(())
@@ -329,7 +335,9 @@ mod tests {
     fn allowed_source_generates_exact_provenance_expectation() -> Result<(), super::PolicyError> {
         let result = policy()?.resolve(&source("refs/tags/v1.2.3"));
         assert_eq!(result.authorization, PolicyAuthorization::Allow);
-        let expectation = result.expectation.ok_or(super::PolicyError::InvalidSourceRef)?;
+        let expectation = result
+            .expectation
+            .ok_or(super::PolicyError::InvalidSourceRef)?;
         assert_eq!(expectation.source_ref, "refs/tags/v1.2.3");
         assert_eq!(expectation.source_commit_sha, "b".repeat(40));
         assert_eq!(expectation.signer_repository, "acme/release-workflows");

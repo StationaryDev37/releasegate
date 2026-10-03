@@ -70,7 +70,9 @@ impl ReceiptSigner {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
         {
-            return Err(AppError::BadRequest("invalid receipt signing key id".into()));
+            return Err(AppError::BadRequest(
+                "invalid receipt signing key id".into(),
+            ));
         }
         let encoding_key = EncodingKey::from_rsa_pem(private_key_pem)
             .map_err(|_| AppError::BadRequest("invalid receipt RSA private key".into()))?;
@@ -235,7 +237,6 @@ fn push_text(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(bytes);
 }
 
-
 fn canonical_pem_identity(pem: &[u8]) -> Result<String, AppError> {
     let text = std::str::from_utf8(pem)
         .map_err(|_| AppError::BadRequest("receipt RSA public key is not UTF-8 PEM".into()))?;
@@ -259,7 +260,8 @@ fn canonical_pem_identity(pem: &[u8]) -> Result<String, AppError> {
                 .and_then(|value| value.strip_suffix("-----"))
                 .ok_or_else(|| {
                     AppError::BadRequest(
-                        "receipt RSA public key must contain exactly one public-key PEM block".into(),
+                        "receipt RSA public key must contain exactly one public-key PEM block"
+                            .into(),
                     )
                 })?;
             if label != "PUBLIC KEY" && label != "RSA PUBLIC KEY" {

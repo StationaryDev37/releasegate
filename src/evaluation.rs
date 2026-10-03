@@ -3,7 +3,10 @@ use std::{fs::File, io::Read, path::PathBuf};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::{error::AppError, policy::{ReleasePolicy, TrustedSourceContext}};
+use crate::{
+    error::AppError,
+    policy::{ReleasePolicy, TrustedSourceContext},
+};
 
 const EVALUATION_SCHEMA_VERSION: &str = "releasegate-evaluation-v2";
 
@@ -94,8 +97,8 @@ impl EvaluationContext {
 pub fn current_binary_sha256() -> Result<String, AppError> {
     let path: PathBuf = std::env::current_exe()
         .map_err(|_| AppError::Internal("failed to resolve current executable"))?;
-    let mut file = File::open(path)
-        .map_err(|_| AppError::Internal("failed to open current executable"))?;
+    let mut file =
+        File::open(path).map_err(|_| AppError::Internal("failed to open current executable"))?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {

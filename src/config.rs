@@ -45,7 +45,8 @@ impl Config {
         let control_token = required_secret("RELEASEGATE_CONTROL_TOKEN")?;
         let evaluator_token = required_secret("RELEASEGATE_EVALUATOR_TOKEN")?;
         let auditor_token = required_secret("RELEASEGATE_AUDITOR_TOKEN")?;
-        let receipt_signing_private_key_pem = required_secret("RELEASEGATE_RECEIPT_PRIVATE_KEY_PEM")?;
+        let receipt_signing_private_key_pem =
+            required_secret("RELEASEGATE_RECEIPT_PRIVATE_KEY_PEM")?;
         let receipt_signing_public_key_pem = env::var("RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM")
             .context("missing required environment variable RELEASEGATE_RECEIPT_PUBLIC_KEY_PEM")?;
         if receipt_signing_public_key_pem.trim().is_empty() {
@@ -92,7 +93,8 @@ impl Config {
 }
 
 fn required_secret(name: &str) -> Result<Secret> {
-    let value = env::var(name).with_context(|| format!("missing required environment variable {name}"))?;
+    let value =
+        env::var(name).with_context(|| format!("missing required environment variable {name}"))?;
     Secret::new(value).map_err(|reason| anyhow::anyhow!("{name}: {reason}"))
 }
 
@@ -106,7 +108,9 @@ fn validate_hostname(host: &str) -> Result<()> {
                 || label.len() > 63
                 || label.starts_with('-')
                 || label.ends_with('-')
-                || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+                || !label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
         })
     {
         anyhow::bail!("RELEASEGATE_GITHUB_BUNDLE_HOST is not a valid DNS hostname");
@@ -117,7 +121,9 @@ fn validate_hostname(host: &str) -> Result<()> {
 fn validate_key_id(value: &str) -> Result<()> {
     if value.is_empty()
         || value.len() > 128
-        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
     {
         anyhow::bail!("RELEASEGATE_RECEIPT_KEY_ID contains unsupported characters");
     }

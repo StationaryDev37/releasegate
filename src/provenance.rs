@@ -19,8 +19,7 @@ use crate::{
 /// This is intentionally exact, not normalized or inferred. If Sigstore moves to
 /// a different log/origin, verification fails closed as INDETERMINATE until the
 /// trusted origin configuration is deliberately updated.
-const PUBLIC_REKOR_V1_CHECKPOINT_ORIGIN: &str =
-    "rekor.sigstore.dev - 1193050959916656506";
+const PUBLIC_REKOR_V1_CHECKPOINT_ORIGIN: &str = "rekor.sigstore.dev - 1193050959916656506";
 const PUBLIC_REKOR_V1_KEY_SHA256: &str =
     "c0d23d6ad406973f9559f3ba2d1ca01f84147d8ffc5b8445c224f98b9591801d";
 
@@ -75,12 +74,7 @@ pub async fn retrieve_and_store(
     artifact_sha256: &str,
 ) -> Result<Vec<RawAttestationBundle>, ProvenanceGateError> {
     let bundles = github
-        .fetch_attestation_bundles(
-            installation_id,
-            repository_id,
-            repository,
-            artifact_sha256,
-        )
+        .fetch_attestation_bundles(installation_id, repository_id, repository, artifact_sha256)
         .await?;
     for bundle in &bundles {
         store::store_attestation_bundle(
@@ -148,7 +142,10 @@ pub fn verify_provenance(
         Err(VerifierBuildError::Attestation(error)) => {
             return all_indeterminate(
                 bundles,
-                format!("invalid_or_unsupported_policy:{}", stable_error_class(&error)),
+                format!(
+                    "invalid_or_unsupported_policy:{}",
+                    stable_error_class(&error)
+                ),
             );
         }
         Err(VerifierBuildError::MissingRekorLog) => {
@@ -299,10 +296,7 @@ fn aggregate(outcomes: Vec<BundleVerification>) -> ProvenanceVerification {
     }
 }
 
-fn all_indeterminate(
-    bundles: &[RawAttestationBundle],
-    reason: String,
-) -> ProvenanceVerification {
+fn all_indeterminate(bundles: &[RawAttestationBundle], reason: String) -> ProvenanceVerification {
     ProvenanceVerification {
         truth: EvidenceTruth::Indeterminate,
         reason: reason.clone(),
