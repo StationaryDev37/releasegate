@@ -69,25 +69,25 @@ pub struct PolicyResolution {
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum PolicyError {
     #[error("installation_id must be positive")]
-    InvalidInstallationId,
+    InstallationId,
     #[error("repository_id must be positive")]
-    InvalidRepositoryId,
+    RepositoryId,
     #[error("repository must be owner/name")]
-    InvalidRepository,
+    Repository,
     #[error("ref rule value is invalid")]
-    InvalidRefRule,
+    RefRule,
     #[error("signer repository must be owner/name")]
-    InvalidSignerRepository,
+    SignerRepository,
     #[error("workflow path must be a .github/workflows YAML file")]
-    InvalidWorkflowPath,
+    WorkflowPath,
     #[error("signer revision must be exactly 40 hexadecimal characters")]
-    InvalidSignerRevision,
+    SignerRevision,
     #[error("trusted source ref is invalid")]
-    InvalidSourceRef,
+    SourceRef,
     #[error("trusted source commit must be exactly 40 hexadecimal characters")]
-    InvalidSourceCommit,
+    SourceCommit,
     #[error("trusted source delivery id is empty")]
-    InvalidDeliveryId,
+    DeliveryId,
 }
 
 impl ReleasePolicy {
@@ -169,32 +169,32 @@ impl ReleasePolicy {
 
 pub fn validate_trusted_source(source: &TrustedSourceContext) -> Result<(), PolicyError> {
     if source.installation_id <= 0 {
-        return Err(PolicyError::InvalidInstallationId);
+        return Err(PolicyError::InstallationId);
     }
     if source.repository_id <= 0 {
-        return Err(PolicyError::InvalidRepositoryId);
+        return Err(PolicyError::RepositoryId);
     }
-    validate_repository(&source.repository).map_err(|_| PolicyError::InvalidRepository)?;
-    validate_ref(&source.source_ref).map_err(|_| PolicyError::InvalidSourceRef)?;
+    validate_repository(&source.repository).map_err(|_| PolicyError::Repository)?;
+    validate_ref(&source.source_ref).map_err(|_| PolicyError::SourceRef)?;
     if !is_sha1_hex(&source.source_commit_sha) {
-        return Err(PolicyError::InvalidSourceCommit);
+        return Err(PolicyError::SourceCommit);
     }
     if source.delivery_id.is_empty() {
-        return Err(PolicyError::InvalidDeliveryId);
+        return Err(PolicyError::DeliveryId);
     }
     Ok(())
 }
 
 fn validate_policy_spec(spec: &ReleasePolicySpec) -> Result<(), PolicyError> {
     if spec.installation_id <= 0 {
-        return Err(PolicyError::InvalidInstallationId);
+        return Err(PolicyError::InstallationId);
     }
     if spec.repository_id <= 0 {
-        return Err(PolicyError::InvalidRepositoryId);
+        return Err(PolicyError::RepositoryId);
     }
-    validate_repository(&spec.repository).map_err(|_| PolicyError::InvalidRepository)?;
+    validate_repository(&spec.repository).map_err(|_| PolicyError::Repository)?;
     validate_repository(&spec.signer_repository)
-        .map_err(|_| PolicyError::InvalidSignerRepository)?;
+        .map_err(|_| PolicyError::SignerRepository)?;
 
     match spec.ref_rule {
         RefRuleKind::Exact => validate_ref(&spec.ref_value)?,
@@ -202,20 +202,20 @@ fn validate_policy_spec(spec: &ReleasePolicySpec) -> Result<(), PolicyError> {
     }
 
     if !valid_workflow_path(&spec.signer_workflow_path) {
-        return Err(PolicyError::InvalidWorkflowPath);
+        return Err(PolicyError::WorkflowPath);
     }
     if !is_sha1_hex(&spec.signer_revision_sha) {
-        return Err(PolicyError::InvalidSignerRevision);
+        return Err(PolicyError::SignerRevision);
     }
     Ok(())
 }
 
 fn validate_repository(value: &str) -> Result<(), PolicyError> {
     let Some((owner, name)) = value.split_once('/') else {
-        return Err(PolicyError::InvalidRepository);
+        return Err(PolicyError::Repository);
     };
     if owner.is_empty() || name.is_empty() || name.contains('/') || value.trim() != value {
-        return Err(PolicyError::InvalidRepository);
+        return Err(PolicyError::Repository);
     }
     Ok(())
 }
@@ -226,7 +226,7 @@ fn validate_ref(value: &str) -> Result<(), PolicyError> {
         || value.len() <= "refs/tags/".len()
         || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*'))
     {
-        return Err(PolicyError::InvalidRefRule);
+        return Err(PolicyError::RefRule);
     }
     Ok(())
 }
@@ -237,7 +237,7 @@ fn validate_ref_prefix(value: &str) -> Result<(), PolicyError> {
         || value.len() <= "refs/tags/".len()
         || value.chars().any(|ch| matches!(ch, '\r' | '\n' | '*'))
     {
-        return Err(PolicyError::InvalidRefRule);
+        return Err(PolicyError::RefRule);
     }
     Ok(())
 }
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(result.authorization, PolicyAuthorization::Allow);
         let expectation = result
             .expectation
-            .ok_or(super::PolicyError::InvalidSourceRef)?;
+            .ok_or(super::PolicyError::SourceRef)?;
         assert_eq!(expectation.source_ref, "refs/tags/v1.2.3");
         assert_eq!(expectation.source_commit_sha, "b".repeat(40));
         assert_eq!(expectation.signer_repository, "acme/release-workflows");

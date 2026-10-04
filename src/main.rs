@@ -582,15 +582,17 @@ async fn freeze_evaluation(
         )
     };
     let release_decision = compose(evidence_truth, authorization);
-    let receipt = state.receipt_signer.sign_decision(
-        &context,
-        evidence_truth,
-        authorization,
-        release_decision,
-        policy_resolution.reason,
-        &provenance_reason,
-        &bundle_outcomes,
-    )?;
+    let receipt = state
+        .receipt_signer
+        .sign_decision(receipt::DecisionSigningInput {
+            context: &context,
+            evidence_truth,
+            policy_authorization: authorization,
+            release_decision,
+            policy_reason: policy_resolution.reason,
+            provenance_reason: &provenance_reason,
+            bundles: &bundle_outcomes,
+        })?;
     let (check_name, check_conclusion, check_title, check_summary) = check_projection_text(
         &context,
         release_decision,
@@ -743,17 +745,17 @@ async fn check_dispatch_loop(state: AppState) {
                 for lease in leases {
                     let result = state
                         .github
-                        .publish_check_run(
-                            lease.installation_id,
-                            lease.repository_id,
-                            &lease.repository,
-                            &lease.head_sha,
-                            &lease.check_name,
-                            &lease.external_id,
-                            &lease.conclusion,
-                            &lease.title,
-                            &lease.summary,
-                        )
+                        .publish_check_run(github::CheckRunPublication {
+                            installation_id: lease.installation_id,
+                            repository_id: lease.repository_id,
+                            repository: &lease.repository,
+                            head_sha: &lease.head_sha,
+                            check_name: &lease.check_name,
+                            external_id: &lease.external_id,
+                            conclusion: &lease.conclusion,
+                            title: &lease.title,
+                            summary: &lease.summary,
+                        })
                         .await;
                     match result {
                         Ok(check_run_id) => {

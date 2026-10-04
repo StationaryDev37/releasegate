@@ -258,6 +258,18 @@ struct CheckRunListQuery<'a> {
     app_id: u64,
 }
 
+pub struct CheckRunPublication<'a> {
+    pub installation_id: i64,
+    pub repository_id: i64,
+    pub repository: &'a str,
+    pub head_sha: &'a str,
+    pub check_name: &'a str,
+    pub external_id: &'a str,
+    pub conclusion: &'a str,
+    pub title: &'a str,
+    pub summary: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct RawAttestationBundle {
     pub initiator: String,
@@ -269,12 +281,16 @@ pub struct RawAttestationBundle {
     pub raw_json: Vec<u8>,
 }
 
+type InstallationTokenCacheKey = (i64, i64, TokenScope);
+type InstallationTokenCache =
+    Arc<RwLock<HashMap<InstallationTokenCacheKey, CachedInstallationToken>>>;
+
 #[derive(Clone)]
 pub struct GithubApi {
     app_id: u64,
     client: reqwest::Client,
     signer: Arc<GithubAppJwtSigner>,
-    token_cache: Arc<RwLock<HashMap<(i64, i64, TokenScope), CachedInstallationToken>>>,
+    token_cache: InstallationTokenCache,
     bundle_host: Arc<str>,
 }
 
@@ -445,16 +461,19 @@ impl GithubApi {
 
     pub async fn publish_check_run(
         &self,
-        installation_id: i64,
-        repository_id: i64,
-        repository: &str,
-        head_sha: &str,
-        check_name: &str,
-        external_id: &str,
-        conclusion: &str,
-        title: &str,
-        summary: &str,
+        request: CheckRunPublication<'_>,
     ) -> Result<i64, GithubApiError> {
+        let CheckRunPublication {
+            installation_id,
+            repository_id,
+            repository,
+            head_sha,
+            check_name,
+            external_id,
+            conclusion,
+            title,
+            summary,
+        } = request;
         let (owner, repo) = split_repository(repository)?;
         if head_sha.len() != 40
             || !head_sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -736,8 +755,8 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 
     // IETF protocol assignments 2001:0000::/23, documentation 2001:db8::/32,
     // deprecated 6to4 2002::/16, and documentation 3fff::/20.
-    if (segments[0] == 0x2001 && (segments[1] & 0xfe00) == 0)
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+    if (segments[0] == 0x2001
+        && ((segments[1] & 0xfe00) == 0 || segments[1] == 0x0db8))
         || segments[0] == 0x2002
         || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
     {
