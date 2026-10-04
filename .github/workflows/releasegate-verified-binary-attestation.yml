@@ -1,0 +1,40 @@
+name: ReleaseGate verified binary attestation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  attestations: write
+  contents: read
+  id-token: write
+
+jobs:
+  attest:
+    name: Attest authoritative ReleaseGate binary
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Download authoritative gate artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifact
+          gh run download 37168534275 \
+            --repo "${GITHUB_REPOSITORY}" \
+            --name releasegate-rc2-authoritative-rust-gate \
+            --dir artifact
+          BIN="$(find artifact -type f -path '*/target/release/releasegate' -print -quit)"
+          test -n "$BIN"
+          test "$(sha256sum "$BIN" | awk '{print $1}')" = "eeb8f45ce5842730d3a09fa65ffb622ea04b2f10861453a8a7d2a4f50f477a20"
+          cp "$BIN" verified-releasegate
+          chmod 0755 verified-releasegate
+          sha256sum verified-releasegate
+
+      - name: Attest verified binary
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: verified-releasegate
