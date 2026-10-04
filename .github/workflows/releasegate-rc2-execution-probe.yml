@@ -111,6 +111,9 @@ jobs:
           cargo tree --locked --all-features \
             > execution-evidence/23-cargo-tree.txt
 
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
       - name: Cargo check with warnings denied
         shell: bash
         run: |

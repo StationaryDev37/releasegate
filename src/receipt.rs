@@ -51,7 +51,7 @@ pub struct SignedReceipt {
     pub receipt_sha256: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct KeyProbe {
     schema: String,
     key_id: String,
@@ -370,7 +370,10 @@ mod tests {
     fn public_key_identity_ignores_line_wrapping() {
         let a = b"-----BEGIN PUBLIC KEY-----\nQUJDREVGRw==\n-----END PUBLIC KEY-----\n";
         let b = b"-----BEGIN PUBLIC KEY-----\r\nQUJD\r\nREVGRw==\r\n-----END PUBLIC KEY-----\r\n";
-        assert_eq!(canonical_pem_identity(a), canonical_pem_identity(b));
+        assert_eq!(
+            canonical_pem_identity(a).expect("first public key identity"),
+            canonical_pem_identity(b).expect("second public key identity")
+        );
     }
 
     #[test]

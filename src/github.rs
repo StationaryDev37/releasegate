@@ -38,7 +38,7 @@ pub fn verify_webhook_signature(secret: &[u8], body: &[u8], header: &str) -> boo
     };
     mac.update(body);
     let expected = mac.finalize().into_bytes();
-    expected.as_slice().ct_eq(provided.as_slice()).into()
+    expected.as_ref().ct_eq(provided.as_slice()).into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
