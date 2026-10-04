@@ -260,7 +260,6 @@ struct CheckRunListQuery<'a> {
 
 #[derive(Debug, Clone)]
 pub struct RawAttestationBundle {
-    pub repository_id: i64,
     pub initiator: String,
     pub source_url_sha256: String,
     pub transport_encoding: String,
@@ -586,7 +585,6 @@ impl GithubApi {
         let (transport_encoding, raw_json) = decode_bundle_json(&wire, MAX_DECODED_BYTES)?;
         let bundle_sha256 = hex::encode(Sha256::digest(&raw_json));
         Ok(RawAttestationBundle {
-            repository_id: item.repository_id,
             initiator: item.initiator.clone(),
             source_url_sha256,
             transport_encoding: transport_encoding.to_owned(),
