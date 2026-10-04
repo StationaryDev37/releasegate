@@ -755,8 +755,7 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 
     // IETF protocol assignments 2001:0000::/23, documentation 2001:db8::/32,
     // deprecated 6to4 2002::/16, and documentation 3fff::/20.
-    if (segments[0] == 0x2001
-        && ((segments[1] & 0xfe00) == 0 || segments[1] == 0x0db8))
+    if (segments[0] == 0x2001 && ((segments[1] & 0xfe00) == 0 || segments[1] == 0x0db8))
         || segments[0] == 0x2002
         || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
     {

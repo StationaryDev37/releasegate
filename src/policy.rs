@@ -193,8 +193,7 @@ fn validate_policy_spec(spec: &ReleasePolicySpec) -> Result<(), PolicyError> {
         return Err(PolicyError::RepositoryId);
     }
     validate_repository(&spec.repository).map_err(|_| PolicyError::Repository)?;
-    validate_repository(&spec.signer_repository)
-        .map_err(|_| PolicyError::SignerRepository)?;
+    validate_repository(&spec.signer_repository).map_err(|_| PolicyError::SignerRepository)?;
 
     match spec.ref_rule {
         RefRuleKind::Exact => validate_ref(&spec.ref_value)?,
@@ -335,9 +334,7 @@ mod tests {
     fn allowed_source_generates_exact_provenance_expectation() -> Result<(), super::PolicyError> {
         let result = policy()?.resolve(&source("refs/tags/v1.2.3"));
         assert_eq!(result.authorization, PolicyAuthorization::Allow);
-        let expectation = result
-            .expectation
-            .ok_or(super::PolicyError::SourceRef)?;
+        let expectation = result.expectation.ok_or(super::PolicyError::SourceRef)?;
         assert_eq!(expectation.source_ref, "refs/tags/v1.2.3");
         assert_eq!(expectation.source_commit_sha, "b".repeat(40));
         assert_eq!(expectation.signer_repository, "acme/release-workflows");
