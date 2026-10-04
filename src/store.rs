@@ -16,6 +16,12 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
         .max_connections(1)
         .connect(database_url)
         .await?;
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = FULL")
+        .execute(&pool)
+        .await?;
     sqlx::query("PRAGMA foreign_keys = ON")
         .execute(&pool)
         .await?;

@@ -1,7 +1,3 @@
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-PRAGMA synchronous = FULL;
-
 CREATE TABLE IF NOT EXISTS webhook_deliveries (
     source TEXT NOT NULL,
     delivery_id TEXT NOT NULL,
