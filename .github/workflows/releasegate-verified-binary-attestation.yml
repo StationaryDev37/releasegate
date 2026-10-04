@@ -23,13 +23,13 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifact
-          gh run download 37168534275 \
+          gh run download 37226746392 \
             --repo "${GITHUB_REPOSITORY}" \
             --name releasegate-rc2-authoritative-rust-gate \
             --dir artifact
           BIN="$(find artifact -type f -path '*/target/release/releasegate' -print -quit)"
           test -n "$BIN"
-          test "$(sha256sum "$BIN" | awk '{print $1}')" = "eeb8f45ce5842730d3a09fa65ffb622ea04b2f10861453a8a7d2a4f50f477a20"
+          test "$(sha256sum "$BIN" | awk '{print $1}')" = "574ac536bf1aa4074963d4125437ae3a077cfca060eded12ce242b29846631f4"
           cp "$BIN" verified-releasegate
           chmod 0755 verified-releasegate
           sha256sum verified-releasegate
