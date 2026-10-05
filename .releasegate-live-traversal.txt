@@ -1,0 +1,1 @@
+ReleaseGate live traversal: post-hotfix automatic check_suite proof.
