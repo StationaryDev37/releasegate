@@ -266,6 +266,10 @@ async fn process_webhook(
     match (source, event) {
         ("github_app", "ping") | ("github_marketplace", "ping") => Ok(()),
         ("github_app", "installation") => handle_installation(db, &payload).await,
+        // GitHub automatically delivers check_suite events to Apps with checks:write.
+        // ReleaseGate drives checks from its frozen evaluation pipeline, so these are acknowledged
+        // and durably journaled without changing decision state.
+        ("github_app", "check_suite") => Ok(()),
         ("github_app", "push") => handle_push_source(db, &payload, delivery).await,
         ("github_marketplace", "marketplace_purchase") => {
             billing::apply_marketplace_event(db, &payload).await
