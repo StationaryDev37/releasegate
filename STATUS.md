@@ -26,20 +26,21 @@ This file distinguishes implemented source from executed evidence. Static gates 
 | Exactly-one metering invariant | PASSED | duplicate evaluation charge rejected by DB identity |
 | Check outbox lease/reclaim invariant | PASSED | independent SQLite adversarial path |
 | Placeholder/demo source rejection | PASSED | commercial gate rejects TODO/unimplemented/placeholder/mock/demo production source |
-| Rust formatting | BLOCKED | no `rustfmt` in this execution runtime |
-| Rust compilation | BLOCKED | no `rustc`/Cargo in this execution runtime |
-| Clippy | BLOCKED | Rust toolchain unavailable here |
-| Rust tests | BLOCKED | Rust toolchain unavailable here |
-| `Cargo.lock` | BLOCKED | authoritative dependency resolution requires Cargo; gate refuses to invent it |
+| Rust formatting | CI-ENFORCED | Rust 1.90.0 rustfmt applied (`a645acc`, `478b0cc`); `cargo fmt --all -- --check` runs in authoritative gate |
+| Rust compilation | CI-ENFORCED | Rust 1.90 cargo-check failures resolved (`828b515`); `RUSTFLAGS=-D warnings cargo check --locked` in authoritative gate |
+| Clippy | CI-ENFORCED | strict clippy boundaries satisfied (`7fe77c2`); `cargo clippy --locked -- -D warnings` in authoritative gate |
+| Rust tests | CI-ENFORCED | `cargo test --locked --all-targets --all-features` in authoritative gate |
+| `Cargo.lock` | COMMITTED | Rust 1.90 resolved lockfile committed (`51f37de`); CI hashes it and fails if regenerated |
+| Live provenance proof | EXECUTED 2026-10-05 | GitHub Actions: subject materialization → `attest-build-provenance` → artifact upload completed successfully |
 | Live GitHub App roundtrip | UNEXECUTED | requires registered App, installation, repository and live secrets |
 | Live Check Run publication | UNEXECUTED | requires the same live GitHub installation |
-| Production release | BLOCKED | requires `scripts/rust_gate.sh` → `RUST_GATE_PASS` plus live GitHub roundtrip evidence |
+| Production release | NOT CLAIMED | requires authoritative-gate green run on consolidated `main` (recorded as release evidence) plus live GitHub roundtrip |
 
 No compile, test, Check delivery, Marketplace collection, or production status is inferred from source inspection.
 
 ## v0.5 production-candidate closure
 
-The production-host boundary is now implemented and audit-hardened on branch `v0.5-production-rc1-fix`:
+The production-host boundary is implemented and audit-hardened (history consolidated into `main`, 2026-10-06):
 
 - hardened systemd runtime service and dedicated Caddy HTTPS edge;
 - create-once host materialization with generated scoped tokens/webhook secrets and a distinct RSA-3072 receipt key;
@@ -56,8 +57,12 @@ The production-host boundary is now implemented and audit-hardened on branch `v0
 - prevented systemd restart storms for launcher exits `40`/`41`;
 - encoded target-runtime silicon-lock generation and webhook-secret rotation semantics in the production contract.
 
-Static, commercial, silicon, production, SQLite integrity, backup and Git-history gates are executed and passing. Rust format/check/Clippy/tests/release build remain **BLOCKED** in this runtime because `rustc`/Cargo are absent. Production release is therefore **NOT CLAIMED**.
+Static, commercial, silicon, production, SQLite integrity, backup and Git-history gates are executed and passing. Rust format/check/Clippy/tests/release build are enforced by the authoritative CI gate (`releasegate-rc2-authoritative-rust-gate.yml`, Rust 1.90.0, `--locked` throughout). Production release is **NOT CLAIMED** until that gate runs green on consolidated `main` and the evidence bundle is recorded.
 
 ## v0.5 RC2 hardening
 
 The RC2 hardening branch adds three release-specific invariants discovered during the post-RC1 adversarial review: invariant-critical recovery and GitHub Check workers are process-supervised so silent worker death forces service shutdown/restart; ambiguous Check-run recovery is bound to ReleaseGate's exact GitHub App ID in addition to the evaluation `external_id`; and bundle egress rejects IPv4-mapped/reserved IPv6 forms before DNS-pinned retrieval. These changes do not promote Rust execution status: the authoritative Rust gate remains required.
+
+## 2026-10-06 history consolidation
+
+`main` and the live-proof line were reconciled into a single canonical history (merge of `main`'s four CI-attestation commits into `releasegate-live-proof-20261005`, zero conflicts). All commits from `releasegate-live-traversal`, `releasegate-live-traversal-fixed-20261005`, and `ci-execution-bridge` were already contained in the live-proof branch. `releasegate-live-traversal-2`'s attestation workflow was retired as a strict subset of the live provenance proof. The live provenance proof workflow now triggers on `main` and manual dispatch. `v0.5-production-rc2-hardening` (tag `v0.5-production-rc2`) is fully contained in `main` and closed.
