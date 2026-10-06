@@ -1,0 +1,92 @@
+name: ReleaseGate RC2 authoritative Rust gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "Commit or branch to gate"
+        required: true
+        default: "ci-execution-bridge"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: releasegate-rc2-authoritative-rust-gate
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  TARGET_INPUT: ${{ inputs.target }}
+
+jobs:
+  rust-gate:
+    name: Shipped scripts/rust_gate.sh
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout selected target
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ inputs.target }}
+          fetch-depth: 1
+
+      - name: Install exact Rust 1.90.0 toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.90.0 \
+            --profile minimal \
+            --component rustfmt \
+            --component clippy \
+            --no-self-update
+          rustup default 1.90.0
+          rustc --version | grep -Eq '^rustc 1\.90\.0 '
+          cargo --version | grep -Eq '^cargo 1\.90\.0 '
+
+      - name: Restore Rust build cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+
+      - name: Record clean execution identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/releasegate-evidence"
+          {
+            echo "target_input=${TARGET_INPUT}"
+            echo "commit=$(git rev-parse HEAD)"
+            rustc --version --verbose
+            cargo --version --verbose
+            sha256sum Cargo.lock
+            git status --porcelain --untracked-files=all
+          } | tee "${RUNNER_TEMP}/releasegate-evidence/00-identity.txt"
+          test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Run shipped authoritative Rust gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/rust_gate.sh 2>&1 \
+            | tee "${RUNNER_TEMP}/releasegate-evidence/10-rust-gate.txt"
+          grep -qx 'RUST_GATE_PASS' "${RUNNER_TEMP}/releasegate-evidence/10-rust-gate.txt"
+          sha256sum target/release/releasegate \
+            | tee "${RUNNER_TEMP}/releasegate-evidence/11-release-binary.sha256"
+          sha256sum Cargo.lock \
+            | tee "${RUNNER_TEMP}/releasegate-evidence/12-cargo-lock.sha256"
+          git rev-parse HEAD \
+            | tee "${RUNNER_TEMP}/releasegate-evidence/13-commit.txt"
+          echo AUTHORITATIVE_RUST_GATE_PASS \
+            | tee "${RUNNER_TEMP}/releasegate-evidence/99-result.txt"
+
+      - name: Upload authoritative gate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: releasegate-rc2-authoritative-rust-gate
+          if-no-files-found: warn
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/releasegate-evidence/
+            target/release/releasegate

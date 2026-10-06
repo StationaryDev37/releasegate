@@ -100,16 +100,21 @@ jobs:
             exit "$status"
           fi
 
-      - name: Resolve dependencies and generate lockfile
+      - name: Validate committed dependency lock
         shell: bash
         run: |
           set -euo pipefail
-          cargo generate-lockfile 2>&1 | tee execution-evidence/20-generate-lockfile.txt
+          test -f Cargo.lock
+          before="$(sha256sum Cargo.lock | awk '{print $1}')"
           sha256sum Cargo.lock | tee execution-evidence/21-cargo-lock.sha256
           cargo metadata --locked --format-version=1 \
             > execution-evidence/22-cargo-metadata.json
           cargo tree --locked --all-features \
             > execution-evidence/23-cargo-tree.txt
+          after="$(sha256sum Cargo.lock | awk '{print $1}')"
+          test "$before" = "$after"
+          git diff --exit-code -- Cargo.lock
+          echo LOCKFILE_PRESERVED | tee execution-evidence/24-lock-result.txt
 
       - name: Restore Rust build cache
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
