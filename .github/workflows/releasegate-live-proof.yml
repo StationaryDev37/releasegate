@@ -3,7 +3,8 @@ name: ReleaseGate live provenance proof
 on:
   push:
     branches:
-      - releasegate-live-proof-20261005
+      - main
+  workflow_dispatch:
 
 permissions:
   contents: read
