@@ -16,8 +16,18 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
         .max_connections(1)
         .connect(database_url)
         .await?;
-    sqlx::query("PRAGMA foreign_keys = ON").execute(&pool).await?;
-    sqlx::query("PRAGMA busy_timeout = 5000").execute(&pool).await?;
+    sqlx::query("PRAGMA journal_mode = WAL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA synchronous = FULL")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA foreign_keys = ON")
+        .execute(&pool)
+        .await?;
+    sqlx::query("PRAGMA busy_timeout = 5000")
+        .execute(&pool)
+        .await?;
     sqlx::migrate!().run(&pool).await?;
     Ok(pool)
 }
@@ -140,18 +150,19 @@ pub async fn lease_delivery(
         return Ok(DeliveryLease::Acquired { token, attempt });
     }
 
-    let state: String = sqlx::query_scalar(
-        "SELECT state FROM webhook_deliveries WHERE source=? AND delivery_id=?",
-    )
-    .bind(source)
-    .bind(delivery_id)
-    .fetch_one(pool)
-    .await?;
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM webhook_deliveries WHERE source=? AND delivery_id=?")
+            .bind(source)
+            .bind(delivery_id)
+            .fetch_one(pool)
+            .await?;
     match state.as_str() {
         "applied" => Ok(DeliveryLease::DuplicateApplied),
         "rejected" => Ok(DeliveryLease::DuplicateRejected),
         "leased" | "received" => Ok(DeliveryLease::InFlight),
-        _ => Err(AppError::Conflict("stored delivery has invalid state".into())),
+        _ => Err(AppError::Conflict(
+            "stored delivery has invalid state".into(),
+        )),
     }
 }
 
@@ -219,7 +230,9 @@ pub async fn release_delivery(
     .execute(pool)
     .await?;
     if result.rows_affected() != 1 {
-        return Err(AppError::Conflict("delivery lease ownership was lost".into()));
+        return Err(AppError::Conflict(
+            "delivery lease ownership was lost".into(),
+        ));
     }
     Ok(())
 }
@@ -331,10 +344,7 @@ async fn terminalize_exhausted_delivery(
     Ok(())
 }
 
-async fn terminalize_exhausted_deliveries(
-    pool: &SqlitePool,
-    now: i64,
-) -> Result<(), AppError> {
+async fn terminalize_exhausted_deliveries(pool: &SqlitePool, now: i64) -> Result<(), AppError> {
     sqlx::query(
         r#"UPDATE webhook_deliveries
            SET state='rejected',lease_token=NULL,lease_expires_unix=NULL,
@@ -374,12 +384,21 @@ async fn transition_delivery(
     .execute(pool)
     .await?;
     if result.rows_affected() != 1 {
-        return Err(AppError::Conflict("delivery lease ownership was lost".into()));
+        return Err(AppError::Conflict(
+            "delivery lease ownership was lost".into(),
+        ));
     }
     Ok(())
 }
 
-pub async fn upsert_installation(pool: &SqlitePool, installation_id: i64, account_id: i64, login: &str, account_type: &str, active: bool) -> Result<(), AppError> {
+pub async fn upsert_installation(
+    pool: &SqlitePool,
+    installation_id: i64,
+    account_id: i64,
+    login: &str,
+    account_type: &str,
+    active: bool,
+) -> Result<(), AppError> {
     sqlx::query(r#"INSERT INTO installations(installation_id,github_account_id,account_login,account_type,active,updated_at)
         VALUES(?,?,?,?,?,?) ON CONFLICT(installation_id) DO UPDATE SET github_account_id=excluded.github_account_id,
         account_login=excluded.account_login, account_type=excluded.account_type, active=excluded.active, updated_at=excluded.updated_at"#)
@@ -433,16 +452,21 @@ pub async fn upsert_subscription(
 }
 
 pub async fn entitlement_active(pool: &SqlitePool, installation_id: i64) -> Result<bool, AppError> {
-    let active: Option<i64> = sqlx::query_scalar(r#"SELECT 1 FROM installations i
+    let active: Option<i64> = sqlx::query_scalar(
+        r#"SELECT 1 FROM installations i
         JOIN subscriptions s ON s.github_account_id=i.github_account_id
-        WHERE i.installation_id=? AND i.active=1 AND s.status='active' LIMIT 1"#)
-        .bind(installation_id).fetch_optional(pool).await?;
+        WHERE i.installation_id=? AND i.active=1 AND s.status='active' LIMIT 1"#,
+    )
+    .bind(installation_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(active.is_some())
 }
 
-
-
-pub async fn installation_active(pool: &SqlitePool, installation_id: i64) -> Result<bool, AppError> {
+pub async fn installation_active(
+    pool: &SqlitePool,
+    installation_id: i64,
+) -> Result<bool, AppError> {
     let active: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM installations WHERE installation_id=? AND active=1 LIMIT 1",
     )
@@ -627,7 +651,9 @@ pub async fn record_trusted_source_event(
 
     let stored = trusted_source_by_delivery(pool, &source.delivery_id)
         .await?
-        .ok_or_else(|| AppError::Conflict("trusted source event disappeared after insert".into()))?;
+        .ok_or_else(|| {
+            AppError::Conflict("trusted source event disappeared after insert".into())
+        })?;
     if &stored != source {
         return Err(AppError::Conflict(
             "delivery_id was already bound to different trusted source facts".into(),
@@ -655,16 +681,25 @@ pub async fn trusted_source_for_commit_ref(
     .bind(source_ref)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)| {
-        crate::policy::TrustedSourceContext {
+    Ok(row.map(
+        |(
+            delivery_id,
             installation_id,
             repository_id,
             repository,
             source_ref,
             source_commit_sha,
-            delivery_id,
-        }
-    }))
+        )| {
+            crate::policy::TrustedSourceContext {
+                installation_id,
+                repository_id,
+                repository,
+                source_ref,
+                source_commit_sha,
+                delivery_id,
+            }
+        },
+    ))
 }
 
 async fn trusted_source_by_delivery(
@@ -678,16 +713,25 @@ async fn trusted_source_by_delivery(
     .bind(delivery_id)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(delivery_id, installation_id, repository_id, repository, source_ref, source_commit_sha)| {
-        crate::policy::TrustedSourceContext {
+    Ok(row.map(
+        |(
+            delivery_id,
             installation_id,
             repository_id,
             repository,
             source_ref,
             source_commit_sha,
-            delivery_id,
-        }
-    }))
+        )| {
+            crate::policy::TrustedSourceContext {
+                installation_id,
+                repository_id,
+                repository,
+                source_ref,
+                source_commit_sha,
+                delivery_id,
+            }
+        },
+    ))
 }
 
 fn policy_from_row(row: ReleasePolicyRow) -> Result<crate::policy::ReleasePolicy, AppError> {
@@ -841,7 +885,9 @@ pub async fn finalize_release_evaluation(
     )
     .bind(&finalization.context.evaluation_id)
     .bind(crate::receipt::truth_str(finalization.evidence_truth))
-    .bind(crate::receipt::authorization_str(finalization.policy_authorization))
+    .bind(crate::receipt::authorization_str(
+        finalization.policy_authorization,
+    ))
     .bind(crate::receipt::release_str(finalization.release_decision))
     .bind(finalization.policy_reason)
     .bind(finalization.provenance_reason)
@@ -908,7 +954,9 @@ pub async fn finalize_release_evaluation(
     tx.commit().await?;
     let stored = get_release_evaluation(pool, &finalization.context.evaluation_id)
         .await?
-        .ok_or(AppError::Internal("release evaluation disappeared after finalization"))?;
+        .ok_or(AppError::Internal(
+            "release evaluation disappeared after finalization",
+        ))?;
     if stored.decision_commitment != finalization.receipt.decision_commitment
         || stored.receipt_sha256 != finalization.receipt.receipt_sha256
         || stored.receipt_key_sha256 != finalization.context.receipt_key_sha256
@@ -936,7 +984,9 @@ pub async fn get_release_evaluation(
     row.map(release_evaluation_from_row).transpose()
 }
 
-fn release_evaluation_from_row(row: ReleaseEvaluationRow) -> Result<ReleaseEvaluationRecord, AppError> {
+fn release_evaluation_from_row(
+    row: ReleaseEvaluationRow,
+) -> Result<ReleaseEvaluationRecord, AppError> {
     Ok(ReleaseEvaluationRecord {
         evaluation_id: row.evaluation_id,
         evidence_truth: parse_truth(&row.evidence_truth)?,
@@ -960,7 +1010,9 @@ fn parse_truth(value: &str) -> Result<crate::decision::EvidenceTruth, AppError> 
         "VERIFIED" => Ok(crate::decision::EvidenceTruth::Verified),
         "INVALID" => Ok(crate::decision::EvidenceTruth::Invalid),
         "INDETERMINATE" => Ok(crate::decision::EvidenceTruth::Indeterminate),
-        _ => Err(AppError::Conflict("stored evidence truth is invalid".into())),
+        _ => Err(AppError::Conflict(
+            "stored evidence truth is invalid".into(),
+        )),
     }
 }
 
@@ -969,7 +1021,9 @@ fn parse_authorization(value: &str) -> Result<crate::decision::PolicyAuthorizati
         "ALLOW" => Ok(crate::decision::PolicyAuthorization::Allow),
         "DENY" => Ok(crate::decision::PolicyAuthorization::Deny),
         "INDETERMINATE" => Ok(crate::decision::PolicyAuthorization::Indeterminate),
-        _ => Err(AppError::Conflict("stored policy authorization is invalid".into())),
+        _ => Err(AppError::Conflict(
+            "stored policy authorization is invalid".into(),
+        )),
     }
 }
 
@@ -978,7 +1032,9 @@ fn parse_release(value: &str) -> Result<crate::decision::ReleaseDecision, AppErr
         "RELEASE" => Ok(crate::decision::ReleaseDecision::Release),
         "BLOCK" => Ok(crate::decision::ReleaseDecision::Block),
         "HOLD" => Ok(crate::decision::ReleaseDecision::Hold),
-        _ => Err(AppError::Conflict("stored release decision is invalid".into())),
+        _ => Err(AppError::Conflict(
+            "stored release decision is invalid".into(),
+        )),
     }
 }
 
@@ -1043,16 +1099,25 @@ pub async fn lease_check_dispatches(
         if changed.rows_affected() != 1 {
             continue;
         }
-        let row: (i64, i64, String, String, String, String, String, String, String) =
-            sqlx::query_as(
-                r#"SELECT installation_id,repository_id,repository,head_sha,check_name,
+        let row: (
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        ) = sqlx::query_as(
+            r#"SELECT installation_id,repository_id,repository,head_sha,check_name,
                    external_id,conclusion,title,summary
                    FROM github_check_outbox WHERE evaluation_id=? AND lease_token=?"#,
-            )
-            .bind(&evaluation_id)
-            .bind(&token)
-            .fetch_one(pool)
-            .await?;
+        )
+        .bind(&evaluation_id)
+        .bind(&token)
+        .fetch_one(pool)
+        .await?;
         leases.push(CheckDispatchLease {
             evaluation_id,
             installation_id: row.0,
@@ -1077,7 +1142,9 @@ pub async fn complete_check_dispatch(
     check_run_id: i64,
 ) -> Result<(), AppError> {
     if check_run_id <= 0 {
-        return Err(AppError::Conflict("GitHub check run id must be positive".into()));
+        return Err(AppError::Conflict(
+            "GitHub check run id must be positive".into(),
+        ));
     }
     let result = sqlx::query(
         r#"UPDATE github_check_outbox
@@ -1092,7 +1159,9 @@ pub async fn complete_check_dispatch(
     .execute(pool)
     .await?;
     if result.rows_affected() != 1 {
-        return Err(AppError::Conflict("GitHub check lease ownership was lost".into()));
+        return Err(AppError::Conflict(
+            "GitHub check lease ownership was lost".into(),
+        ));
     }
     Ok(())
 }
@@ -1112,8 +1181,12 @@ pub async fn release_check_dispatch(
     .await?
     .ok_or_else(|| AppError::Conflict("GitHub check lease ownership was lost".into()))?;
     let exponent = u32::try_from(attempt.saturating_sub(1).clamp(0, 6)).unwrap_or(6);
-    let delay = 5_i64.saturating_mul(2_i64.saturating_pow(exponent)).min(300);
-    let next_attempt = OffsetDateTime::now_utc().unix_timestamp().saturating_add(delay);
+    let delay = 5_i64
+        .saturating_mul(2_i64.saturating_pow(exponent))
+        .min(300);
+    let next_attempt = OffsetDateTime::now_utc()
+        .unix_timestamp()
+        .saturating_add(delay);
     let result = sqlx::query(
         r#"UPDATE github_check_outbox
            SET state='pending',lease_token=NULL,lease_expires_unix=NULL,next_attempt_unix=?,
@@ -1128,7 +1201,9 @@ pub async fn release_check_dispatch(
     .execute(pool)
     .await?;
     if result.rows_affected() != 1 {
-        return Err(AppError::Conflict("GitHub check lease ownership was lost".into()));
+        return Err(AppError::Conflict(
+            "GitHub check lease ownership was lost".into(),
+        ));
     }
     Ok(())
 }
@@ -1152,7 +1227,9 @@ pub async fn dead_letter_check_dispatch(
     .execute(pool)
     .await?;
     if result.rows_affected() != 1 {
-        return Err(AppError::Conflict("GitHub check lease ownership was lost".into()));
+        return Err(AppError::Conflict(
+            "GitHub check lease ownership was lost".into(),
+        ));
     }
     Ok(())
 }

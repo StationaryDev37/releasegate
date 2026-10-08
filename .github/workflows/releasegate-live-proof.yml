@@ -1,0 +1,42 @@
+name: ReleaseGate live provenance proof
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+jobs:
+  attest:
+    name: Attest deterministic live-proof subject
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Materialize proof subject
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'releasegate-live-proof\nrepository=%s\nref=%s\ncommit=%s\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_REF" "$GITHUB_SHA" \
+            > releasegate-live-proof.txt
+          sha256sum releasegate-live-proof.txt | tee SHA256SUMS.txt
+
+      - name: Attest proof subject
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: releasegate-live-proof.txt
+
+      - name: Upload proof subject
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: releasegate-live-proof-subject
+          retention-days: 14
+          path: |
+            releasegate-live-proof.txt
+            SHA256SUMS.txt

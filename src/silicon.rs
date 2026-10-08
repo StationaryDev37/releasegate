@@ -38,7 +38,8 @@ pub fn attest_runtime() -> Result<RuntimeSiliconAttestation> {
     }
 
     let path = PathBuf::from(lock_path);
-    let raw = fs::read(&path).with_context(|| format!("failed to read silicon lock {}", path.display()))?;
+    let raw = fs::read(&path)
+        .with_context(|| format!("failed to read silicon lock {}", path.display()))?;
     let observed_lock_sha256 = hex::encode(Sha256::digest(&raw));
     if observed_lock_sha256 != expected_lock_sha256 {
         anyhow::bail!("silicon lock byte hash mismatch");
@@ -84,14 +85,19 @@ fn required_env(name: &str) -> Result<String> {
 
 fn required_sha256(name: &str) -> Result<String> {
     let value = required_env(name)?;
-    if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()) {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
         anyhow::bail!("{name} must be 64 lowercase hexadecimal characters");
     }
     Ok(value)
 }
 
 fn process_allowed_cpus() -> Result<Vec<u32>> {
-    let status = fs::read_to_string("/proc/self/status").context("failed to read /proc/self/status")?;
+    let status =
+        fs::read_to_string("/proc/self/status").context("failed to read /proc/self/status")?;
     let cpus = status
         .lines()
         .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
@@ -121,11 +127,17 @@ fn parse_cpu_list(text: &str) -> Result<Vec<u32>> {
 }
 
 fn normalized(cpus: Vec<u32>) -> Vec<u32> {
-    cpus.into_iter().collect::<BTreeSet<_>>().into_iter().collect()
+    cpus.into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn format_cpu_list(cpus: &[u32]) -> String {
-    cpus.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+    cpus.iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]

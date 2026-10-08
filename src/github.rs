@@ -1,14 +1,19 @@
 use hmac::{Hmac, Mac};
 
-use std::{collections::HashMap, net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr}, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
+    sync::Arc,
+    time::Duration,
+};
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue, LINK, USER_AGENT};
-use tokio::sync::RwLock;
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
+use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, LINK, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
+use time::{format_description::well_known::Rfc3339, OffsetDateTime};
+use tokio::sync::RwLock;
 
 use crate::error::AppError;
 
@@ -33,7 +38,8 @@ pub fn verify_webhook_signature(secret: &[u8], body: &[u8], header: &str) -> boo
     };
     mac.update(body);
     let expected = mac.finalize().into_bytes();
-    expected.as_slice().ct_eq(provided.as_slice()).into()
+    let expected_bytes: &[u8] = expected.as_ref();
+    expected_bytes.ct_eq(provided.as_slice()).into()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -53,7 +59,9 @@ pub struct GithubAppJwtSigner {
 impl GithubAppJwtSigner {
     pub fn from_app_id(app_id: u64, private_key_pem: &[u8]) -> Result<Self, AppError> {
         if app_id == 0 {
-            return Err(AppError::BadRequest("GitHub App ID must be positive".into()));
+            return Err(AppError::BadRequest(
+                "GitHub App ID must be positive".into(),
+            ));
         }
         let key = EncodingKey::from_rsa_pem(private_key_pem)
             .map_err(|_| AppError::BadRequest("invalid GitHub App RSA private key".into()))?;
@@ -78,7 +86,6 @@ impl GithubAppJwtSigner {
             .map_err(|_| AppError::BadRequest("failed to sign GitHub App JWT".into()))
     }
 }
-
 
 const GITHUB_API_VERSION: &str = "2026-03-10";
 const TOKEN_REUSE_SAFETY_SECONDS: i64 = 120;
@@ -120,9 +127,7 @@ impl GithubApiError {
     pub fn is_retryable(&self) -> bool {
         matches!(
             self,
-            Self::Transport
-                | Self::HttpStatus(429)
-                | Self::HttpStatus(500..=599)
+            Self::Transport | Self::HttpStatus(429) | Self::HttpStatus(500..=599)
         )
     }
 
@@ -200,7 +205,6 @@ struct InstallationTokenResponse {
     expires_at: String,
 }
 
-
 #[derive(Debug, Deserialize)]
 struct AttestationListResponse {
     attestations: Vec<AttestationReference>,
@@ -254,9 +258,20 @@ struct CheckRunListQuery<'a> {
     app_id: u64,
 }
 
+pub struct CheckRunPublication<'a> {
+    pub installation_id: i64,
+    pub repository_id: i64,
+    pub repository: &'a str,
+    pub head_sha: &'a str,
+    pub check_name: &'a str,
+    pub external_id: &'a str,
+    pub conclusion: &'a str,
+    pub title: &'a str,
+    pub summary: &'a str,
+}
+
 #[derive(Debug, Clone)]
 pub struct RawAttestationBundle {
-    pub repository_id: i64,
     pub initiator: String,
     pub source_url_sha256: String,
     pub transport_encoding: String,
@@ -266,19 +281,26 @@ pub struct RawAttestationBundle {
     pub raw_json: Vec<u8>,
 }
 
+type InstallationTokenCacheKey = (i64, i64, TokenScope);
+type InstallationTokenCache =
+    Arc<RwLock<HashMap<InstallationTokenCacheKey, CachedInstallationToken>>>;
+
 #[derive(Clone)]
 pub struct GithubApi {
     app_id: u64,
     client: reqwest::Client,
     signer: Arc<GithubAppJwtSigner>,
-    token_cache: Arc<RwLock<HashMap<(i64, i64, TokenScope), CachedInstallationToken>>>,
+    token_cache: InstallationTokenCache,
     bundle_host: Arc<str>,
 }
 
 impl GithubApi {
     pub fn new(signer: GithubAppJwtSigner, bundle_host: String) -> Result<Self, GithubApiError> {
         let mut headers = HeaderMap::new();
-        headers.insert(ACCEPT, HeaderValue::from_static("application/vnd.github+json"));
+        headers.insert(
+            ACCEPT,
+            HeaderValue::from_static("application/vnd.github+json"),
+        );
         headers.insert(
             USER_AGENT,
             HeaderValue::from_static(concat!("releasegate/", env!("CARGO_PKG_VERSION"))),
@@ -325,9 +347,8 @@ impl GithubApi {
         }
 
         let jwt = self.signer.mint().map_err(|_| GithubApiError::Jwt)?;
-        let url = format!(
-            "https://api.github.com/app/installations/{installation_id}/access_tokens"
-        );
+        let url =
+            format!("https://api.github.com/app/installations/{installation_id}/access_tokens");
         let request = InstallationTokenRequest {
             repository_ids: [repository_id],
             permissions: scope.permissions(),
@@ -390,18 +411,14 @@ impl GithubApi {
         artifact_sha256: &str,
     ) -> Result<Vec<RawAttestationBundle>, GithubApiError> {
         let (owner, repo) = split_repository(repository)?;
-        if artifact_sha256.len() != 64
-            || !artifact_sha256.bytes().all(|b| b.is_ascii_hexdigit())
-        {
+        if artifact_sha256.len() != 64 || !artifact_sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
             return Err(GithubApiError::InvalidAttestationRequest);
         }
         let token = self
             .attestation_token(installation_id, repository_id)
             .await?;
         let digest = format!("sha256:{}", artifact_sha256.to_ascii_lowercase());
-        let url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/attestations/{digest}"
-        );
+        let url = format!("https://api.github.com/repos/{owner}/{repo}/attestations/{digest}");
         let response = self
             .client
             .get(url)
@@ -444,16 +461,19 @@ impl GithubApi {
 
     pub async fn publish_check_run(
         &self,
-        installation_id: i64,
-        repository_id: i64,
-        repository: &str,
-        head_sha: &str,
-        check_name: &str,
-        external_id: &str,
-        conclusion: &str,
-        title: &str,
-        summary: &str,
+        request: CheckRunPublication<'_>,
     ) -> Result<i64, GithubApiError> {
+        let CheckRunPublication {
+            installation_id,
+            repository_id,
+            repository,
+            head_sha,
+            check_name,
+            external_id,
+            conclusion,
+            title,
+            summary,
+        } = request;
         let (owner, repo) = split_repository(repository)?;
         if head_sha.len() != 40
             || !head_sha.bytes().all(|b| b.is_ascii_hexdigit())
@@ -470,9 +490,8 @@ impl GithubApi {
             return Err(GithubApiError::InvalidCheckRequest);
         }
         let token = self.check_token(installation_id, repository_id).await?;
-        let list_url = format!(
-            "https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs"
-        );
+        let list_url =
+            format!("https://api.github.com/repos/{owner}/{repo}/commits/{head_sha}/check-runs");
         let existing = self
             .client
             .get(&list_url)
@@ -548,8 +567,8 @@ impl GithubApi {
     ) -> Result<RawAttestationBundle, GithubApiError> {
         const MAX_WIRE_BYTES: u64 = 4 * 1024 * 1024;
         const MAX_DECODED_BYTES: usize = 8 * 1024 * 1024;
-        let url = reqwest::Url::parse(&item.bundle_url)
-            .map_err(|_| GithubApiError::UnsafeBundleUrl)?;
+        let url =
+            reqwest::Url::parse(&item.bundle_url).map_err(|_| GithubApiError::UnsafeBundleUrl)?;
         validate_bundle_url(&url, self.bundle_host.as_ref())?;
         let pinned_addr = resolve_public_bundle_addr(self.bundle_host.as_ref()).await?;
         let bundle_client = reqwest::Client::builder()
@@ -568,7 +587,10 @@ impl GithubApi {
         if !status.is_success() {
             return Err(GithubApiError::HttpStatus(status.as_u16()));
         }
-        if response.content_length().is_some_and(|n| n > MAX_WIRE_BYTES) {
+        if response
+            .content_length()
+            .is_some_and(|n| n > MAX_WIRE_BYTES)
+        {
             return Err(GithubApiError::BundleTooLarge);
         }
         let wire = response
@@ -582,7 +604,6 @@ impl GithubApi {
         let (transport_encoding, raw_json) = decode_bundle_json(&wire, MAX_DECODED_BYTES)?;
         let bundle_sha256 = hex::encode(Sha256::digest(&raw_json));
         Ok(RawAttestationBundle {
-            repository_id: item.repository_id,
             initiator: item.initiator.clone(),
             source_url_sha256,
             transport_encoding: transport_encoding.to_owned(),
@@ -601,9 +622,7 @@ fn matching_check_run_id(
 ) -> Option<i64> {
     runs.into_iter()
         .find(|run| {
-            run.app.id == app_id
-                && run.id > 0
-                && run.external_id.as_deref() == Some(external_id)
+            run.app.id == app_id && run.id > 0 && run.external_id.as_deref() == Some(external_id)
         })
         .map(|run| run.id)
 }
@@ -619,8 +638,8 @@ fn decode_bundle_json(
         return Ok(("identity-json", wire.to_vec()));
     }
 
-    let decoded_len = snap::raw::decompress_len(wire)
-        .map_err(|_| GithubApiError::InvalidBundleEncoding)?;
+    let decoded_len =
+        snap::raw::decompress_len(wire).map_err(|_| GithubApiError::InvalidBundleEncoding)?;
     if decoded_len == 0 || decoded_len > max_decoded_bytes {
         return Err(GithubApiError::BundleTooLarge);
     }
@@ -736,8 +755,7 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 
     // IETF protocol assignments 2001:0000::/23, documentation 2001:db8::/32,
     // deprecated 6to4 2002::/16, and documentation 3fff::/20.
-    if (segments[0] == 0x2001 && (segments[1] & 0xfe00) == 0)
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+    if (segments[0] == 0x2001 && ((segments[1] & 0xfe00) == 0 || segments[1] == 0x0db8))
         || segments[0] == 0x2002
         || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0)
     {
@@ -749,16 +767,16 @@ fn is_public_ipv6(ip: Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
-    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
+    use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+    use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
     use rsa::{
-        RsaPrivateKey,
         pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+        RsaPrivateKey,
     };
 
     use super::{
-        CheckRunApp, CheckRunResponse, GithubAppClaims, GithubAppJwtSigner, is_public_ip,
-        matching_check_run_id, validate_bundle_url, verify_webhook_signature,
+        is_public_ip, matching_check_run_id, validate_bundle_url, verify_webhook_signature,
+        CheckRunApp, CheckRunResponse, GithubAppClaims, GithubAppJwtSigner,
     };
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -837,9 +855,11 @@ mod tests {
 
     #[test]
     fn bundle_url_requires_exact_configured_host() {
-        let good = reqwest::Url::parse("https://attest.example.test/object.json").expect("url fixture");
+        let good =
+            reqwest::Url::parse("https://attest.example.test/object.json").expect("url fixture");
         assert!(validate_bundle_url(&good, "attest.example.test").is_ok());
-        let wrong = reqwest::Url::parse("https://evil.example.test/object.json").expect("url fixture");
+        let wrong =
+            reqwest::Url::parse("https://evil.example.test/object.json").expect("url fixture");
         assert!(validate_bundle_url(&wrong, "attest.example.test").is_err());
     }
 
@@ -857,13 +877,18 @@ mod tests {
             "2001:2::1".parse().expect("ipv6 fixture"),
             "2002::1".parse().expect("ipv6 fixture"),
             "3fff::1".parse().expect("ipv6 fixture"),
-            "::ffff:127.0.0.1".parse().expect("ipv6 mapped loopback fixture"),
-            "::ffff:8.8.8.8".parse().expect("ipv6 mapped public fixture"),
+            "::ffff:127.0.0.1"
+                .parse()
+                .expect("ipv6 mapped loopback fixture"),
+            "::ffff:8.8.8.8"
+                .parse()
+                .expect("ipv6 mapped public fixture"),
         ] {
             assert!(!is_public_ip(ip));
         }
         assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
-        assert!(is_public_ip("2606:4700:4700::1111".parse().expect("public ipv6 fixture")));
+        assert!(is_public_ip(
+            "2606:4700:4700::1111".parse().expect("public ipv6 fixture")
+        ));
     }
-
 }

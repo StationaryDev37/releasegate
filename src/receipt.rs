@@ -51,7 +51,17 @@ pub struct SignedReceipt {
     pub receipt_sha256: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+pub struct DecisionSigningInput<'a> {
+    pub context: &'a EvaluationContext,
+    pub evidence_truth: EvidenceTruth,
+    pub policy_authorization: PolicyAuthorization,
+    pub release_decision: ReleaseDecision,
+    pub policy_reason: &'a str,
+    pub provenance_reason: &'a str,
+    pub bundles: &'a [BundleVerification],
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 struct KeyProbe {
     schema: String,
     key_id: String,
@@ -70,7 +80,9 @@ impl ReceiptSigner {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))
         {
-            return Err(AppError::BadRequest("invalid receipt signing key id".into()));
+            return Err(AppError::BadRequest(
+                "invalid receipt signing key id".into(),
+            ));
         }
         let encoding_key = EncodingKey::from_rsa_pem(private_key_pem)
             .map_err(|_| AppError::BadRequest("invalid receipt RSA private key".into()))?;
@@ -97,14 +109,17 @@ impl ReceiptSigner {
 
     pub fn sign_decision(
         &self,
-        context: &EvaluationContext,
-        evidence_truth: EvidenceTruth,
-        policy_authorization: PolicyAuthorization,
-        release_decision: ReleaseDecision,
-        policy_reason: &str,
-        provenance_reason: &str,
-        bundles: &[BundleVerification],
+        input: DecisionSigningInput<'_>,
     ) -> Result<SignedReceipt, AppError> {
+        let DecisionSigningInput {
+            context,
+            evidence_truth,
+            policy_authorization,
+            release_decision,
+            policy_reason,
+            provenance_reason,
+            bundles,
+        } = input;
         let attestation_set_sha256 = attestation_set_commitment(bundles);
         let decision_commitment = decision_commitment(
             context,
@@ -235,7 +250,6 @@ fn push_text(out: &mut Vec<u8>, value: &str) {
     out.extend_from_slice(bytes);
 }
 
-
 fn canonical_pem_identity(pem: &[u8]) -> Result<String, AppError> {
     let text = std::str::from_utf8(pem)
         .map_err(|_| AppError::BadRequest("receipt RSA public key is not UTF-8 PEM".into()))?;
@@ -259,7 +273,8 @@ fn canonical_pem_identity(pem: &[u8]) -> Result<String, AppError> {
                 .and_then(|value| value.strip_suffix("-----"))
                 .ok_or_else(|| {
                     AppError::BadRequest(
-                        "receipt RSA public key must contain exactly one public-key PEM block".into(),
+                        "receipt RSA public key must contain exactly one public-key PEM block"
+                            .into(),
                     )
                 })?;
             if label != "PUBLIC KEY" && label != "RSA PUBLIC KEY" {
@@ -339,7 +354,9 @@ mod tests {
         RsaPrivateKey,
     };
 
-    use super::{attestation_set_commitment, canonical_pem_identity, ReceiptSigner};
+    use super::{
+        attestation_set_commitment, canonical_pem_identity, DecisionSigningInput, ReceiptSigner,
+    };
     use crate::{
         decision::{EvidenceTruth, PolicyAuthorization, ReleaseDecision},
         evaluation::EvaluationContext,
@@ -368,7 +385,10 @@ mod tests {
     fn public_key_identity_ignores_line_wrapping() {
         let a = b"-----BEGIN PUBLIC KEY-----\nQUJDREVGRw==\n-----END PUBLIC KEY-----\n";
         let b = b"-----BEGIN PUBLIC KEY-----\r\nQUJD\r\nREVGRw==\r\n-----END PUBLIC KEY-----\r\n";
-        assert_eq!(canonical_pem_identity(a), canonical_pem_identity(b));
+        assert_eq!(
+            canonical_pem_identity(a).expect("first public key identity"),
+            canonical_pem_identity(b).expect("second public key identity")
+        );
     }
 
     #[test]
@@ -410,15 +430,15 @@ mod tests {
             created_at: "2026-09-30T00:00:00Z".into(),
         };
         let receipt = signer
-            .sign_decision(
-                &context,
-                EvidenceTruth::Verified,
-                PolicyAuthorization::Allow,
-                ReleaseDecision::Release,
-                "source_and_signer_policy_bound",
-                "at_least_one_attestation_verified",
-                &[],
-            )
+            .sign_decision(DecisionSigningInput {
+                context: &context,
+                evidence_truth: EvidenceTruth::Verified,
+                policy_authorization: PolicyAuthorization::Allow,
+                release_decision: ReleaseDecision::Release,
+                policy_reason: "source_and_signer_policy_bound",
+                provenance_reason: "at_least_one_attestation_verified",
+                bundles: &[],
+            })
             .expect("sign receipt");
         assert!(receipt.receipt_id.starts_with("rgr_"));
         assert_eq!(receipt.decision_commitment.len(), 64);
