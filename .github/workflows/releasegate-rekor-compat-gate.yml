@@ -1,0 +1,33 @@
+name: ReleaseGate Rekor compatibility gate
+
+on:
+  push:
+    branches:
+      - fix/rekor-envelope-original-bytes-20261015
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  rust-compatibility-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Install pinned compiler
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default 1.90.0
+          rustc --version
+      - name: Verify committed source is clean
+        run: |
+          git status --porcelain --untracked-files=all
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - name: Verify dependency resolution is frozen
+        run: cargo metadata --locked --format-version=1 --no-deps >/dev/null
+      - name: Compile and test ReleaseGate as shipped
+        run: bash scripts/rust_gate.sh
+      - name: Compile and test vendored verifier including tamper cases
+        run: |
+          cargo test --manifest-path vendor/attestation-verify/Cargo.toml --lib

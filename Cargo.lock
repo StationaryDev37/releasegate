@@ -52,8 +52,6 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 [[package]]
 name = "attestation-verify"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9a4133bbdfe637963f2e8149ef1bec408c913acdbe51960cd90eb0be37d7c81"
 dependencies = [
  "base64 0.23.1",
  "der 0.8.2",

@@ -42,3 +42,7 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = "deny"
+
+# Pinned upstream 0.1.0 sources, subject to the verified Rekor compatibility patch.
+[patch.crates-io]
+attestation-verify = { path = "vendor/attestation-verify" }
