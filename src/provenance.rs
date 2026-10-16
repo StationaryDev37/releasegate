@@ -374,4 +374,103 @@ mod tests {
         let result = aggregate(vec![outcome(EvidenceTruth::Indeterminate, "a")]);
         assert_eq!(result.truth, EvidenceTruth::Indeterminate);
     }
+
+    /// Replays the same raw attestation stored during the October 5 production
+    /// HOLD without changing the frozen decision. The SHA-256 pin below was
+    /// read from the live, read-only SQLite evidence table.
+    #[test]
+    #[rustfmt::skip]
+    fn october_05_real_production_attestation_replay() {
+        use super::{verify_provenance, ProvenanceExpectation};
+        use crate::github::RawAttestationBundle;
+        use sha2::{Digest, Sha256};
+
+        #[derive(serde::Deserialize)]
+        struct Candidate {
+            wire_hex: String,
+        }
+
+        const EXPECTED_BUNDLE: &str = "52ea3f6c7008a8abbc52b8cd9e45c7d24daebcd8a3102a0577091adf09cdc5ad";
+        const EXPECTED_ARTIFACT: &str = "bf521b7cba583b49cc11da09096606eb51e705345d8a0c25f4dc3ea19062ea3b";
+        let candidates: Vec<Candidate> = serde_json::from_str(include_str!(
+            "../fixtures/provenance/oct05-production-bundles.json"
+        ))
+        .expect("pinned GitHub original evidence fixture JSON");
+        let mut matched = Vec::<RawAttestationBundle>::new();
+        let mut observed = Vec::<String>::new();
+        for candidate in candidates {
+            let wire = hex::decode(candidate.wire_hex).expect("bundle wire must be hex");
+            let raw_json = if serde_json::from_slice::<serde_json::Value>(&wire).is_ok() {
+                wire.clone()
+            } else {
+                snap::raw::Decoder::new()
+                    .decompress_vec(&wire)
+                    .expect("bundle wire must contain valid Snappy JSON")
+            };
+            let digest = hex::encode(Sha256::digest(&raw_json));
+            observed.push(digest.clone());
+            if digest == EXPECTED_BUNDLE {
+                matched.push(RawAttestationBundle {
+                    initiator: "real_github_oct05_replay".to_owned(),
+                    source_url_sha256: String::new(),
+                    transport_encoding: "original_github_wire".to_owned(),
+                    wire_sha256: hex::encode(Sha256::digest(&wire)),
+                    wire_bytes: wire,
+                    bundle_sha256: digest,
+                    raw_json,
+                });
+            }
+        }
+        assert_eq!(
+            matched.len(),
+            1,
+            "exactly one GitHub attestation must match frozen production SHA-256; observed={observed:?}"
+        );
+        let expectation = ProvenanceExpectation {
+            source_repository: "StationaryDev37/releasegate".to_owned(),
+            source_repository_id: 1403461149,
+            source_ref: "refs/heads/releasegate-live-proof-20261005".to_owned(),
+            source_commit_sha: "7323bcf3d5bd079d5534d6da07f48ca36dc11d5f".to_owned(),
+            signer_repository: "StationaryDev37/releasegate".to_owned(),
+            signer_workflow_path: ".github/workflows/releasegate-live-proof.yml".to_owned(),
+            signer_revision_sha: "7323bcf3d5bd079d5534d6da07f48ca36dc11d5f".to_owned(),
+        };
+        let result = verify_provenance(EXPECTED_ARTIFACT, &expectation, &matched);
+        assert_eq!(
+            result.truth,
+            EvidenceTruth::Verified,
+            "real frozen attestation did not verify: {result:#?}"
+        );
+        assert_eq!(result.reason, "at_least_one_attestation_verified");
+
+        let mut wrong_policy = expectation.clone();
+        wrong_policy.signer_revision_sha = "0000000000000000000000000000000000000000".to_owned();
+        let wrong_signer = verify_provenance(EXPECTED_ARTIFACT, &wrong_policy, &matched);
+        assert_ne!(wrong_signer.truth, EvidenceTruth::Verified);
+
+        let wrong_artifact = verify_provenance(
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            &expectation,
+            &matched,
+        );
+        assert_ne!(wrong_artifact.truth, EvidenceTruth::Verified);
+
+        // Tamper a signed envelope signature while preserving the originally
+        // authenticated tlog body and prove this cannot turn into VERIFIED.
+        let mut tampered = matched[0].clone();
+        let mut doc: serde_json::Value =
+            serde_json::from_slice(&tampered.raw_json).expect("real Sigstore JSON");
+        let signature = doc["dsseEnvelope"]["signatures"][0]["sig"]
+            .as_str()
+            .expect("real signature field")
+            .to_owned();
+        assert!(!signature.is_empty());
+        let first = if signature.starts_with('A') { "B" } else { "A" };
+        doc["dsseEnvelope"]["signatures"][0]["sig"] =
+            serde_json::Value::String(format!("{first}{}", &signature[1..]));
+        tampered.raw_json = serde_json::to_vec(&doc).expect("tampered evidence JSON");
+        tampered.bundle_sha256 = hex::encode(Sha256::digest(&tampered.raw_json));
+        let invalid_signature = verify_provenance(EXPECTED_ARTIFACT, &expectation, &[tampered]);
+        assert_ne!(invalid_signature.truth, EvidenceTruth::Verified);
+    }
 }
