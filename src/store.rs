@@ -868,6 +868,7 @@ pub struct ReleaseFinalization<'a> {
     pub check_conclusion: &'a str,
     pub check_title: &'a str,
     pub check_summary: &'a str,
+    pub paid_session_id: Option<&'a str>,
 }
 
 pub async fn finalize_release_evaluation(
@@ -903,6 +904,20 @@ pub async fn finalize_release_evaluation(
     .await?;
 
     if inserted.rows_affected() == 1 {
+        if let Some(session_id) = finalization.paid_session_id {
+            let consumed = sqlx::query(
+                "UPDATE stripe_one_time_credits SET consumed_evaluation_id=?, consumed_at=? \
+                 WHERE session_id=? AND installation_id=? AND state='paid' \
+                 AND consumed_evaluation_id IS NULL")
+                .bind(&finalization.context.evaluation_id)
+                .bind(&completed_at)
+                .bind(session_id)
+                .bind(finalization.context.installation_id)
+                .execute(&mut *tx).await?;
+            if consumed.rows_affected() != 1 {
+                return Err(AppError::Unauthorized);
+            }
+        }
         for outcome in finalization.bundle_outcomes {
             sqlx::query(
                 r#"INSERT INTO evaluation_attestation_outcomes(
@@ -1263,4 +1278,23 @@ pub async fn check_dispatch_state(
     .bind(evaluation_id)
     .fetch_optional(pool)
     .await?)
+}
+
+/// Existing immutable evaluations may be purchased without rewriting their signed receipt.
+/// The session is consumed exactly once, or idempotently for the same evaluation ID.
+pub async fn claim_paid_credit_for_existing(
+    pool: &SqlitePool,
+    session_id: &str,
+    installation_id: i64,
+    evaluation_id: &str,
+) -> Result<(), AppError> {
+    let now = now_rfc3339()?;
+    let updated = sqlx::query(
+        "UPDATE stripe_one_time_credits SET consumed_evaluation_id=?, consumed_at=COALESCE(consumed_at,?) \
+         WHERE session_id=? AND installation_id=? AND state='paid' \
+         AND (consumed_evaluation_id IS NULL OR consumed_evaluation_id=?)")
+        .bind(evaluation_id).bind(now).bind(session_id).bind(installation_id).bind(evaluation_id)
+        .execute(pool).await?;
+    if updated.rows_affected() != 1 { return Err(AppError::Unauthorized); }
+    Ok(())
 }

@@ -10,6 +10,8 @@ mod provenance;
 mod receipt;
 mod secret;
 mod silicon;
+mod stripe_once;
+mod stripe_ui;
 mod store;
 
 use std::{
@@ -125,6 +127,13 @@ fn router(state: AppState) -> Router {
         .route("/v1/evaluations", post(freeze_evaluation))
         .route("/v1/evaluations/:id", get(get_evaluation))
         .route("/v1/receipt-key", get(get_receipt_key))
+        .route("/v1/checkout/link/:installation_id", get(stripe_once::checkout_link))
+        .route("/webhooks/stripe", post(stripe_once::webhook))
+        .route("/v1/policies/paid", post(stripe_once::activate_paid_policy))
+        .route("/v1/evaluations/paid", post(paid_evaluation))
+        .route("/v1/orders", post(stripe_once::order_status))
+        .route("/buy", get(stripe_ui::buy))
+        .route("/receipt", get(stripe_ui::receipt))
         .layer(RequestBodyLimitLayer::new(1_048_576))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -498,7 +507,26 @@ async fn freeze_evaluation(
     Json(req): Json<EvaluationRequest>,
 ) -> Result<Json<EvaluationResultResponse>, AppError> {
     authorize(&state.config.evaluator_token, &headers)?;
-    if !store::entitlement_active(&state.db, req.installation_id).await? {
+    evaluate_internal(&state, req, None).await
+}
+
+async fn paid_evaluation(
+    State(state): State<AppState>,
+    Json(paid): Json<stripe_once::PaidEvaluationRequest>,
+) -> Result<Json<EvaluationResultResponse>, AppError> {
+    if state.config.stripe_commercial.is_none()
+        || !stripe_once::paid_session_authorized(&state.db, &paid.session_id, paid.request.installation_id).await? {
+        return Err(AppError::Unauthorized);
+    }
+    evaluate_internal(&state, paid.request, Some(paid.session_id.as_str())).await
+}
+
+async fn evaluate_internal(
+    state: &AppState,
+    req: EvaluationRequest,
+    paid_session: Option<&str>,
+) -> Result<Json<EvaluationResultResponse>, AppError> {
+    if paid_session.is_none() && !store::entitlement_active(&state.db, req.installation_id).await? {
         return Err(AppError::Unauthorized);
     }
     if req.artifact_sha256.len() != 64
@@ -534,13 +562,19 @@ async fn freeze_evaluation(
         state.receipt_signer.public_key_sha256(),
         store::now_rfc3339()?,
     )?;
+    if let Some(session_id) = paid_session {
+        if !stripe_once::paid_session_open_or_matches(&state.db, session_id, &context.evaluation_id).await? {
+            return Err(AppError::Unauthorized);
+        }
+    }
     let context = store::freeze_evaluation_context(&state.db, &context).await?;
 
     if let Some(existing) = store::get_release_evaluation(&state.db, &context.evaluation_id).await?
     {
-        return Ok(Json(
-            build_evaluation_response(&state, context, existing).await?,
-        ));
+        if let Some(session_id) = paid_session {
+            store::claim_paid_credit_for_existing(&state.db, session_id, context.installation_id, &context.evaluation_id).await?;
+        }
+        return Ok(Json(build_evaluation_response(state, context, existing).await?));
     }
 
     let (evidence_truth, provenance_reason, bundle_outcomes) = if authorization
@@ -622,6 +656,7 @@ async fn freeze_evaluation(
             check_conclusion,
             check_title: &check_title,
             check_summary: &check_summary,
+            paid_session_id: paid_session,
         },
     )
     .await?;

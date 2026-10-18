@@ -5,6 +5,14 @@ use anyhow::{Context, Result};
 use crate::secret::Secret;
 
 #[derive(Clone)]
+pub struct StripeCommercial {
+    pub webhook_secret: Secret,
+    pub claim_key: Secret,
+    pub payment_link_id: String,
+    pub payment_link_url: String,
+}
+
+#[derive(Clone)]
 pub struct Config {
     pub bind: SocketAddr,
     pub database_url: String,
@@ -21,6 +29,7 @@ pub struct Config {
     pub delivery_lease_seconds: i64,
     pub check_lease_seconds: i64,
     pub bundle_host: String,
+    pub stripe_commercial: Option<StripeCommercial>,
 }
 
 impl Config {
@@ -72,6 +81,40 @@ impl Config {
         let bundle_host = env::var("RELEASEGATE_GITHUB_BUNDLE_HOST")
             .context("missing required environment variable RELEASEGATE_GITHUB_BUNDLE_HOST")?;
         validate_hostname(&bundle_host)?;
+        let stripe_keys = [
+            "RELEASEGATE_STRIPE_WEBHOOK_SECRET",
+            "RELEASEGATE_STRIPE_CLAIM_KEY",
+            "RELEASEGATE_STRIPE_PAYMENT_LINK_ID",
+            "RELEASEGATE_STRIPE_PAYMENT_LINK_URL",
+        ];
+        let configured = stripe_keys.iter().filter(|key| env::var(key).is_ok()).count();
+        let stripe_commercial = if configured == 0 {
+            None
+        } else if configured == stripe_keys.len() {
+            let webhook_secret = env::var(stripe_keys[0])?;
+            let claim_key = env::var(stripe_keys[1])?;
+            let payment_link_id = env::var(stripe_keys[2])?;
+            let payment_link_url = env::var(stripe_keys[3])?;
+            if !webhook_secret.starts_with("whsec_") || webhook_secret.len() < 12
+                || claim_key.len() < 32
+                || !payment_link_id.starts_with("plink_")
+                || payment_link_id.len() > 128
+                || !payment_link_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || !payment_link_url.starts_with("https://buy.stripe.com/")
+                || payment_link_url.contains('?') || payment_link_url.contains('#')
+                || payment_link_url.len() > 256
+            {
+                anyhow::bail!("invalid RELEASEGATE_STRIPE commercial configuration");
+            }
+            Some(StripeCommercial {
+                webhook_secret: Secret::new(webhook_secret).map_err(anyhow::Error::msg)?,
+                claim_key: Secret::new(claim_key).map_err(anyhow::Error::msg)?,
+                payment_link_id,
+                payment_link_url,
+            })
+        } else {
+            anyhow::bail!("incomplete RELEASEGATE_STRIPE commercial configuration");
+        };
         Ok(Self {
             bind,
             database_url,
@@ -88,6 +131,7 @@ impl Config {
             delivery_lease_seconds,
             check_lease_seconds,
             bundle_host,
+            stripe_commercial,
         })
     }
 }

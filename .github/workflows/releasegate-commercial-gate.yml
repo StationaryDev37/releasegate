@@ -1,0 +1,52 @@
+name: ReleaseGate one-time revenue gate
+on:
+  push:
+    branches: [feat/stripe-one-time-credit-gate-20261018]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  format:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      formatted: ${{ steps.format.outputs.formatted }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: true
+      - name: Pin Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default 1.90.0
+      - name: Commit canonical formatting if required
+        id: format
+        shell: bash
+        run: |
+          cargo fmt --all
+          if ! git diff --quiet -- src; then
+            git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+            git config user.name 'github-actions[bot]'
+            git add -- src
+            git commit -m 'style: format commercial release source'
+            git push origin HEAD:feat/stripe-one-time-credit-gate-20261018
+            echo 'formatted=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'formatted=false' >> "$GITHUB_OUTPUT"
+          fi
+  rust-revenue-gate:
+    needs: format
+    if: needs.format.outputs.formatted == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Pin Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy --no-self-update
+          rustup default 1.90.0
+          rustc --version
+      - name: Verify locked source and run all Rust gates
+        run: bash scripts/rust_gate.sh
+      - name: Verify vendored attestation tamper cases
+        run: cargo test --manifest-path vendor/attestation-verify/Cargo.toml --lib
