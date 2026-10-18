@@ -10,9 +10,9 @@ mod provenance;
 mod receipt;
 mod secret;
 mod silicon;
+mod store;
 mod stripe_once;
 mod stripe_ui;
-mod store;
 
 use std::{
     sync::{
@@ -127,7 +127,10 @@ fn router(state: AppState) -> Router {
         .route("/v1/evaluations", post(freeze_evaluation))
         .route("/v1/evaluations/:id", get(get_evaluation))
         .route("/v1/receipt-key", get(get_receipt_key))
-        .route("/v1/checkout/link/:installation_id", get(stripe_once::checkout_link))
+        .route(
+            "/v1/checkout/link/:installation_id",
+            get(stripe_once::checkout_link),
+        )
         .route("/webhooks/stripe", post(stripe_once::webhook))
         .route("/v1/policies/paid", post(stripe_once::activate_paid_policy))
         .route("/v1/evaluations/paid", post(paid_evaluation))
@@ -515,7 +518,13 @@ async fn paid_evaluation(
     Json(paid): Json<stripe_once::PaidEvaluationRequest>,
 ) -> Result<Json<EvaluationResultResponse>, AppError> {
     if state.config.stripe_commercial.is_none()
-        || !stripe_once::paid_session_authorized(&state.db, &paid.session_id, paid.request.installation_id).await? {
+        || !stripe_once::paid_session_authorized(
+            &state.db,
+            &paid.session_id,
+            paid.request.installation_id,
+        )
+        .await?
+    {
         return Err(AppError::Unauthorized);
     }
     evaluate_internal(&state, paid.request, Some(paid.session_id.as_str())).await
@@ -563,7 +572,9 @@ async fn evaluate_internal(
         store::now_rfc3339()?,
     )?;
     if let Some(session_id) = paid_session {
-        if !stripe_once::paid_session_open_or_matches(&state.db, session_id, &context.evaluation_id).await? {
+        if !stripe_once::paid_session_open_or_matches(&state.db, session_id, &context.evaluation_id)
+            .await?
+        {
             return Err(AppError::Unauthorized);
         }
     }
@@ -572,9 +583,17 @@ async fn evaluate_internal(
     if let Some(existing) = store::get_release_evaluation(&state.db, &context.evaluation_id).await?
     {
         if let Some(session_id) = paid_session {
-            store::claim_paid_credit_for_existing(&state.db, session_id, context.installation_id, &context.evaluation_id).await?;
+            store::claim_paid_credit_for_existing(
+                &state.db,
+                session_id,
+                context.installation_id,
+                &context.evaluation_id,
+            )
+            .await?;
         }
-        return Ok(Json(build_evaluation_response(state, context, existing).await?));
+        return Ok(Json(
+            build_evaluation_response(state, context, existing).await?,
+        ));
     }
 
     let (evidence_truth, provenance_reason, bundle_outcomes) = if authorization

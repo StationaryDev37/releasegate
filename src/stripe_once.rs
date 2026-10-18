@@ -47,15 +47,17 @@ pub struct CheckoutLink {
 }
 
 fn hmac_hex(key: &[u8], bytes: &[u8]) -> Result<String, AppError> {
-    let mut mac = HmacSha256::new_from_slice(key)
-        .map_err(|_| AppError::Internal("invalid HMAC key"))?;
+    let mut mac =
+        HmacSha256::new_from_slice(key).map_err(|_| AppError::Internal("invalid HMAC key"))?;
     mac.update(bytes);
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 fn signed_ref(installation_id: i64, secret: &[u8]) -> Result<String, AppError> {
     if installation_id <= 0 {
-        return Err(AppError::BadRequest("installation ID must be positive".into()));
+        return Err(AppError::BadRequest(
+            "installation ID must be positive".into(),
+        ));
     }
     let data = format!("rgp1_{installation_id}");
     let mac = hmac_hex(secret, data.as_bytes())?;
@@ -85,14 +87,21 @@ pub async fn checkout_link(
     State(state): State<AppState>,
     Path(installation_id): Path<i64>,
 ) -> Result<Json<CheckoutLink>, AppError> {
-    let config = state.config.stripe_commercial.as_ref().ok_or(AppError::NotFound)?;
+    let config = state
+        .config
+        .stripe_commercial
+        .as_ref()
+        .ok_or(AppError::NotFound)?;
     if !crate::store::installation_active(&state.db, installation_id).await? {
         return Err(AppError::NotFound);
     }
     let reference = signed_ref(installation_id, config.claim_key.as_bytes())?;
     // Config is validated as a plain HTTPS Stripe URL with no existing query/fragment.
     Ok(Json(CheckoutLink {
-        purchase_url: format!("{}?client_reference_id={reference}", config.payment_link_url),
+        purchase_url: format!(
+            "{}?client_reference_id={reference}",
+            config.payment_link_url
+        ),
         installation_id,
         price_usd_cents: PRICE_USD_CENTS,
     }))
@@ -102,7 +111,9 @@ fn verify_signature(secret: &[u8], header: &str, body: &[u8], now: i64) -> bool 
     let mut timestamp: Option<i64> = None;
     let mut signatures = Vec::new();
     for part in header.split(',') {
-        let Some((name, value)) = part.trim().split_once('=') else { return false; };
+        let Some((name, value)) = part.trim().split_once('=') else {
+            return false;
+        };
         match name {
             "t" if timestamp.is_none() => {
                 if value.starts_with('-') || value.starts_with('+') || value.starts_with('0') {
@@ -112,15 +123,23 @@ fn verify_signature(secret: &[u8], header: &str, body: &[u8], now: i64) -> bool 
             }
             "t" => return false,
             "v1" => {
-                if value.len() != 64 { return false; }
-                let Ok(bytes) = hex::decode(value) else { return false; };
+                if value.len() != 64 {
+                    return false;
+                }
+                let Ok(bytes) = hex::decode(value) else {
+                    return false;
+                };
                 signatures.push(bytes);
             }
-            _ => {},
+            _ => {}
         }
     }
-    let Some(t) = timestamp else { return false; };
-    if signatures.is_empty() || (i128::from(now) - i128::from(t)).abs() > i128::from(MAX_SKEW_SECONDS) {
+    let Some(t) = timestamp else {
+        return false;
+    };
+    if signatures.is_empty()
+        || (i128::from(now) - i128::from(t)).abs() > i128::from(MAX_SKEW_SECONDS)
+    {
         return false;
     }
     let mut mac = match HmacSha256::new_from_slice(secret) {
@@ -131,7 +150,9 @@ fn verify_signature(secret: &[u8], header: &str, body: &[u8], now: i64) -> bool 
     mac.update(b".");
     mac.update(body);
     let digest = mac.finalize().into_bytes();
-    signatures.iter().any(|sig| bool::from(sig.as_slice().ct_eq(digest.as_ref())))
+    signatures
+        .iter()
+        .any(|sig| bool::from(sig.as_slice().ct_eq(digest.as_ref())))
 }
 
 pub async fn webhook(
@@ -139,8 +160,13 @@ pub async fn webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
-    let config = state.config.stripe_commercial.as_ref().ok_or(AppError::NotFound)?;
-    let signature = headers.get("stripe-signature")
+    let config = state
+        .config
+        .stripe_commercial
+        .as_ref()
+        .ok_or(AppError::NotFound)?;
+    let signature = headers
+        .get("stripe-signature")
         .and_then(|v| v.to_str().ok())
         .ok_or(AppError::Unauthorized)?;
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -149,13 +175,16 @@ pub async fn webhook(
     }
     let event: Value = serde_json::from_slice(&body)
         .map_err(|_| AppError::BadRequest("invalid Stripe JSON".into()))?;
-    let kind = event.get("type").and_then(Value::as_str)
+    let kind = event
+        .get("type")
+        .and_then(Value::as_str)
         .ok_or_else(|| AppError::BadRequest("Stripe event type missing".into()))?;
     if event.get("livemode") != Some(&Value::Bool(true)) {
         return Err(AppError::BadRequest("live Stripe events only".into()));
     }
-    let object = event.pointer("/data/object").ok_or_else(||
-        AppError::BadRequest("Stripe event data.object missing".into()))?;
+    let object = event
+        .pointer("/data/object")
+        .ok_or_else(|| AppError::BadRequest("Stripe event data.object missing".into()))?;
     match kind {
         "checkout.session.completed" | "checkout.session.async_payment_succeeded" => {
             // Session may be complete but awaiting delayed payment. Never credit before paid.
@@ -168,7 +197,8 @@ pub async fn webhook(
                 || object.get("mode").and_then(Value::as_str) != Some("payment")
                 || object.get("status").and_then(Value::as_str) != Some("complete")
                 || object.get("livemode") != Some(&Value::Bool(true))
-                || object.get("payment_link").and_then(Value::as_str) != Some(config.payment_link_id.as_str())
+                || object.get("payment_link").and_then(Value::as_str)
+                    != Some(config.payment_link_id.as_str())
                 || object.get("amount_total").and_then(Value::as_i64) != Some(PRICE_USD_CENTS)
                 || object.get("currency").and_then(Value::as_str) != Some("usd")
             {
@@ -190,13 +220,15 @@ pub async fn webhook(
                     .bind(intent).execute(&state.db).await?;
             }
         }
-        _ => {},
+        _ => {}
     }
     Ok(StatusCode::OK)
 }
 
 fn required_str<'a>(value: &'a Value, key: &str) -> Result<&'a str, AppError> {
-    value.get(key).and_then(Value::as_str)
+    value
+        .get(key)
+        .and_then(Value::as_str)
         .filter(|s| !s.is_empty() && s.len() <= 256)
         .ok_or_else(|| AppError::BadRequest(format!("Stripe field {key} invalid")))
 }
@@ -208,8 +240,10 @@ async fn record_paid(
     intent: &str,
     installation_id: i64,
 ) -> Result<(), AppError> {
-    if !event_id.starts_with("evt_") || !session_id.starts_with("cs_live_")
-        || !intent.starts_with("pi_") {
+    if !event_id.starts_with("evt_")
+        || !session_id.starts_with("cs_live_")
+        || !intent.starts_with("pi_")
+    {
         return Err(AppError::Unauthorized);
     }
     let mut tx = db.begin().await?;
@@ -220,7 +254,9 @@ async fn record_paid(
         "SELECT payment_intent,event_id,installation_id FROM stripe_one_time_credits WHERE session_id=?")
         .bind(session_id).fetch_one(&mut *tx).await?;
     if stored.0 != intent || stored.2 != installation_id {
-        return Err(AppError::Conflict("Stripe session replay identity conflict".into()));
+        return Err(AppError::Conflict(
+            "Stripe session replay identity conflict".into(),
+        ));
     }
     // A different Stripe event ID for the same verified Checkout session may be legitimate
     // (completed then async success); neither event grants another credit.
@@ -234,7 +270,9 @@ pub async fn paid_session_authorized(
     session_id: &str,
     installation_id: i64,
 ) -> Result<bool, AppError> {
-    if !session_id.starts_with("cs_live_") || session_id.len() > 256 { return Ok(false); }
+    if !session_id.starts_with("cs_live_") || session_id.len() > 256 {
+        return Ok(false);
+    }
     let row: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM stripe_one_time_credits WHERE session_id=? AND installation_id=? AND state='paid' LIMIT 1")
         .bind(session_id).bind(installation_id).fetch_optional(db).await?;
@@ -261,13 +299,16 @@ pub async fn activate_paid_policy(
     Json(paid): Json<PaidPolicyRequest>,
 ) -> Result<Json<crate::policy::ReleasePolicy>, AppError> {
     if state.config.stripe_commercial.is_none()
-        || !paid_session_authorized(&state.db, &paid.session_id, paid.spec.installation_id).await? {
+        || !paid_session_authorized(&state.db, &paid.session_id, paid.spec.installation_id).await?
+    {
         return Err(AppError::Unauthorized);
     }
     let available: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM stripe_one_time_credits WHERE session_id=? AND state='paid' AND consumed_evaluation_id IS NULL")
         .bind(&paid.session_id).fetch_optional(&state.db).await?;
-    if available.is_none() { return Err(AppError::Unauthorized); }
+    if available.is_none() {
+        return Err(AppError::Unauthorized);
+    }
     // Policy may only be configured for a repository observed through authenticated GitHub push.
     let observed: Option<i64> = sqlx::query_scalar(
         "SELECT 1 FROM trusted_source_events WHERE installation_id=? AND repository_id=? AND repository=? LIMIT 1")
@@ -275,7 +316,9 @@ pub async fn activate_paid_policy(
         .bind(paid.spec.repository_id)
         .bind(&paid.spec.repository)
         .fetch_optional(&state.db).await?;
-    if observed.is_none() { return Err(AppError::NotFound); }
+    if observed.is_none() {
+        return Err(AppError::NotFound);
+    }
     let policy = crate::policy::ReleasePolicy::new(paid.spec)
         .map_err(|e| AppError::BadRequest(e.to_string()))?;
     crate::store::store_release_policy(&state.db, &policy).await?;
@@ -287,8 +330,10 @@ pub async fn order_status(
     State(state): State<AppState>,
     Json(lookup): Json<OrderLookupRequest>,
 ) -> Result<Json<Value>, AppError> {
-    if state.config.stripe_commercial.is_none() || !lookup.session_id.starts_with("cs_live_")
-        || lookup.session_id.len() > 256 {
+    if state.config.stripe_commercial.is_none()
+        || !lookup.session_id.starts_with("cs_live_")
+        || lookup.session_id.len() > 256
+    {
         return Err(AppError::NotFound);
     }
     // Session ID is a bearer capability, passed in the POST body rather than logged as a URL.
@@ -298,13 +343,19 @@ pub async fn order_status(
     let (status, evaluation_id, installation_id) = row.ok_or(AppError::NotFound)?;
     if let Some(evaluation_id) = evaluation_id {
         let context = crate::store::get_evaluation_context(&state.db, &evaluation_id)
-            .await?.ok_or(AppError::NotFound)?;
+            .await?
+            .ok_or(AppError::NotFound)?;
         let result = crate::store::get_release_evaluation(&state.db, &evaluation_id)
-            .await?.ok_or(AppError::NotFound)?;
+            .await?
+            .ok_or(AppError::NotFound)?;
         let receipt = crate::build_evaluation_response(&state, context, result).await?;
-        return Ok(Json(json!({"payment_state":status,"installation_id":installation_id,"result":receipt})));
+        return Ok(Json(
+            json!({"payment_state":status,"installation_id":installation_id,"result":receipt}),
+        ));
     }
-    Ok(Json(json!({"payment_state":status,"installation_id":installation_id,"evaluation_id":Value::Null})))
+    Ok(Json(
+        json!({"payment_state":status,"installation_id":installation_id,"evaluation_id":Value::Null}),
+    ))
 }
 
 #[cfg(test)]
@@ -320,20 +371,58 @@ mod tests {
         message.extend_from_slice(payload);
         let mac = hmac_hex(b"whsec_fixture_not_live", &message).unwrap();
         let header = format!("t={t},v1={mac}");
-        assert!(verify_signature(b"whsec_fixture_not_live", &header, payload, t));
+        assert!(verify_signature(
+            b"whsec_fixture_not_live",
+            &header,
+            payload,
+            t
+        ));
         assert!(!verify_signature(b"wrong", &header, payload, t));
-        assert!(!verify_signature(b"whsec_fixture_not_live", &header, b"mutated", t));
-        assert!(!verify_signature(b"whsec_fixture_not_live", &header, payload, t + 301));
-        assert!(!verify_signature(b"whsec_fixture_not_live", &header, payload, t - 301));
-        assert!(verify_signature(b"whsec_fixture_not_live", &header, payload, t + 300));
+        assert!(!verify_signature(
+            b"whsec_fixture_not_live",
+            &header,
+            b"mutated",
+            t
+        ));
+        assert!(!verify_signature(
+            b"whsec_fixture_not_live",
+            &header,
+            payload,
+            t + 301
+        ));
+        assert!(!verify_signature(
+            b"whsec_fixture_not_live",
+            &header,
+            payload,
+            t - 301
+        ));
+        assert!(verify_signature(
+            b"whsec_fixture_not_live",
+            &header,
+            payload,
+            t + 300
+        ));
     }
 
     #[test]
     fn signature_parser_rejects_ambiguous_and_malformed_headers() {
         let message = b"test";
-        for header in ["", "t=0,v1=00", "t=-1,v1=00", "t=1,t=1,v1=abcd",
-            "t=1,v1=abcd", "v1=00", "t=1", "t=1,v1=gggg"] {
-            assert!(!verify_signature(b"whsec_fixture_not_live", header, message, 1));
+        for header in [
+            "",
+            "t=0,v1=00",
+            "t=-1,v1=00",
+            "t=1,t=1,v1=abcd",
+            "t=1,v1=abcd",
+            "v1=00",
+            "t=1",
+            "t=1,v1=gggg",
+        ] {
+            assert!(!verify_signature(
+                b"whsec_fixture_not_live",
+                header,
+                message,
+                1
+            ));
         }
     }
 

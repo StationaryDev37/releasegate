@@ -1,5 +1,8 @@
 //! Dependency-free, same-origin developer checkout and signed receipt delivery pages.
-use axum::{http::{header, HeaderMap, HeaderValue}, response::{Html, IntoResponse}};
+use axum::{
+    http::{header, HeaderMap, HeaderValue},
+    response::{Html, IntoResponse},
+};
 
 const BUY: &str = r##"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -60,10 +63,17 @@ fn security_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
-    headers.insert(header::X_CONTENT_TYPE_OPTIONS, HeaderValue::from_static("nosniff"));
+    headers.insert(
+        header::X_CONTENT_TYPE_OPTIONS,
+        HeaderValue::from_static("nosniff"),
+    );
     headers.insert("content-security-policy", HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"));
     headers
 }
 
-pub async fn buy() -> impl IntoResponse { (security_headers(), Html(BUY)) }
-pub async fn receipt() -> impl IntoResponse { (security_headers(), Html(RECEIPT)) }
+pub async fn buy() -> impl IntoResponse {
+    (security_headers(), Html(BUY))
+}
+pub async fn receipt() -> impl IntoResponse {
+    (security_headers(), Html(RECEIPT))
+}

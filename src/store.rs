@@ -908,12 +908,14 @@ pub async fn finalize_release_evaluation(
             let consumed = sqlx::query(
                 "UPDATE stripe_one_time_credits SET consumed_evaluation_id=?, consumed_at=? \
                  WHERE session_id=? AND installation_id=? AND state='paid' \
-                 AND consumed_evaluation_id IS NULL")
-                .bind(&finalization.context.evaluation_id)
-                .bind(&completed_at)
-                .bind(session_id)
-                .bind(finalization.context.installation_id)
-                .execute(&mut *tx).await?;
+                 AND consumed_evaluation_id IS NULL",
+            )
+            .bind(&finalization.context.evaluation_id)
+            .bind(&completed_at)
+            .bind(session_id)
+            .bind(finalization.context.installation_id)
+            .execute(&mut *tx)
+            .await?;
             if consumed.rows_affected() != 1 {
                 return Err(AppError::Unauthorized);
             }
@@ -1295,6 +1297,8 @@ pub async fn claim_paid_credit_for_existing(
          AND (consumed_evaluation_id IS NULL OR consumed_evaluation_id=?)")
         .bind(evaluation_id).bind(now).bind(session_id).bind(installation_id).bind(evaluation_id)
         .execute(pool).await?;
-    if updated.rows_affected() != 1 { return Err(AppError::Unauthorized); }
+    if updated.rows_affected() != 1 {
+        return Err(AppError::Unauthorized);
+    }
     Ok(())
 }

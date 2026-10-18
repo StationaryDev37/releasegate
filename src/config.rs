@@ -87,7 +87,10 @@ impl Config {
             "RELEASEGATE_STRIPE_PAYMENT_LINK_ID",
             "RELEASEGATE_STRIPE_PAYMENT_LINK_URL",
         ];
-        let configured = stripe_keys.iter().filter(|key| env::var(key).is_ok()).count();
+        let configured = stripe_keys
+            .iter()
+            .filter(|key| env::var(key).is_ok())
+            .count();
         let stripe_commercial = if configured == 0 {
             None
         } else if configured == stripe_keys.len() {
@@ -95,13 +98,17 @@ impl Config {
             let claim_key = env::var(stripe_keys[1])?;
             let payment_link_id = env::var(stripe_keys[2])?;
             let payment_link_url = env::var(stripe_keys[3])?;
-            if !webhook_secret.starts_with("whsec_") || webhook_secret.len() < 12
+            if !webhook_secret.starts_with("whsec_")
+                || webhook_secret.len() < 12
                 || claim_key.len() < 32
                 || !payment_link_id.starts_with("plink_")
                 || payment_link_id.len() > 128
-                || !payment_link_id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || !payment_link_id
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'_')
                 || !payment_link_url.starts_with("https://buy.stripe.com/")
-                || payment_link_url.contains('?') || payment_link_url.contains('#')
+                || payment_link_url.contains('?')
+                || payment_link_url.contains('#')
                 || payment_link_url.len() > 256
             {
                 anyhow::bail!("invalid RELEASEGATE_STRIPE commercial configuration");
