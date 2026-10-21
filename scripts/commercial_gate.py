@@ -93,11 +93,11 @@ def main() -> None:
     assert cargo["dependencies"]["jsonwebtoken"]["version"] == "=11.1.0"
 
     migrations = sorted((ROOT / "migrations").glob("*.sql"))
-    assert migrations[-1].name == "0008_commercial_loop.sql"
+    assert [p.name for p in migrations[-2:]] == ["0008_commercial_loop.sql", "0009_stripe_one_time_credit.sql"]
 
     # Prove upgrade from the locked v0.3.2 schema does not discard an existing frozen context.
     legacy = sqlite3.connect(":memory:")
-    apply_migrations(legacy, migrations[:-1])
+    apply_migrations(legacy, migrations[:-2])
     legacy.execute(
         "INSERT INTO installations VALUES(?,?,?,?,?,?)",
         (42, 7001, "acme", "Organization", 1, "2026-09-30T00:00:00Z"),
@@ -117,7 +117,7 @@ def main() -> None:
         ("rge_legacy",42,99,"acme/widget","delivery-legacy","refs/tags/v1.2.3","b"*40,
          policy_hash,"c"*64,"d"*64,"e"*64,"2026-09-30T00:00:03Z"),
     )
-    legacy.executescript(migrations[-1].read_text())
+    legacy.executescript(migrations[-2].read_text())
     upgraded = legacy.execute(
         "SELECT receipt_key_sha256 FROM evaluation_contexts WHERE evaluation_id='rge_legacy'"
     ).fetchone()
@@ -135,6 +135,7 @@ def main() -> None:
         "usage_events",
     } <= tables
     assert "verification_receipts" not in tables
+    assert "stripe_one_time_credits" in tables
 
     ev = json.loads((ROOT / "fixtures/adversarial/evaluation-context.json").read_text())
     dec = json.loads((ROOT / "fixtures/adversarial/release-decision.json").read_text())
