@@ -692,7 +692,7 @@ async fn evaluate_internal(
         "release evaluation durably finalized"
     );
     Ok(Json(
-        build_evaluation_response(&state, context, stored).await?,
+        build_evaluation_response(state, context, stored).await?,
     ))
 }
 
